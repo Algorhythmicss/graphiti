@@ -17,6 +17,7 @@ from graph_service.ambient import (
     DEFAULT_DECAY_PER_DAY,
     _default_token_counter,
     compose_ambient_block,
+    effective_confidence,
     heuristic_confidence,
     self_uuid_for_group,
 )
@@ -114,6 +115,56 @@ def test_naive_edge_timestamp_serializes_as_utc_in_citation():
     _, citations = compose_ambient_block([edge], token_budget=10_000, now=NOW)
     dumped = citations[0].model_dump(mode='json')
     assert dumped['reference_time'] == '2026-07-11T12:00:00+00:00'
+
+
+# --- effective_confidence (Phase 3: persisted confidence + TTL + pinned) ------
+
+
+def test_effective_confidence_uses_persisted_when_present():
+    edge = make_edge('a', 'b', 'x')
+    edge.confidence_rating = 0.9
+    edge.confidence_uncertainty = 0.1
+    edge.confidence_last_touched_at = NOW  # fresh -> no decay
+    edge.corroboration_count = 3
+    r, u = effective_confidence(edge, NOW)
+    assert r == 0.9 and u == 0.1  # persisted values, not the 0.7/0.35 heuristic
+
+
+def test_effective_confidence_decays_persisted_over_time():
+    edge = make_edge('a', 'b', 'x')
+    edge.confidence_rating = 0.9
+    edge.confidence_uncertainty = 0.1
+    edge.confidence_last_touched_at = NOW - timedelta(days=10)
+    r, u = effective_confidence(edge, NOW)
+    assert abs(u - (0.1 + 10 * 0.01)) < 1e-9  # canonical decay 0.01/day -> 0.2
+    assert r == 0.9
+
+
+def test_effective_confidence_falls_back_to_heuristic_when_unpersisted():
+    edge = make_edge('a', 'b', 'x')  # confidence_last_touched_at defaults to None
+    assert effective_confidence(edge, NOW) == heuristic_confidence(edge, NOW)
+
+
+def test_effective_confidence_pinned_is_full_trust_and_never_decays():
+    edge = make_edge('a', 'b', 'x', age_days=100)
+    edge.confirmed = True
+    edge.confidence_last_touched_at = NOW - timedelta(days=100)
+    edge.confidence_uncertainty = 0.9
+    assert effective_confidence(edge, NOW) == (1.0, 0.0)  # pinned ground truth
+
+
+def test_ttl_expired_edge_is_dropped():
+    edges = [make_edge('a', 'b', 'live', uuid='LIVE'), make_edge('c', 'd', 'stale', uuid='TTL')]
+    edges[1].expires_at = NOW - timedelta(days=1)  # past its validity horizon
+    _, citations = compose_ambient_block(edges, token_budget=10_000, now=NOW)
+    assert {c.edge_uuid for c in citations} == {'LIVE'}
+
+
+def test_ttl_future_edge_is_kept():
+    edge = make_edge('a', 'b', 'future', uuid='F')
+    edge.expires_at = NOW + timedelta(days=5)  # still valid
+    _, citations = compose_ambient_block([edge], token_budget=10_000, now=NOW)
+    assert {c.edge_uuid for c in citations} == {'F'}
 
 
 # --- compose_ambient_block ----------------------------------------------------

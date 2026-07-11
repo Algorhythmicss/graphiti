@@ -37,6 +37,7 @@ from datetime import datetime, timezone
 from uuid import NAMESPACE_URL, uuid5
 
 from graphiti_core.edges import EntityEdge
+from graphiti_core.utils.confidence import Confidence, with_time_decay
 
 from graph_service.dto import Citation
 
@@ -220,6 +221,45 @@ def heuristic_confidence(
     return rating, uncertainty
 
 
+def effective_confidence(
+    edge: EntityEdge,
+    now: datetime,
+    decay_per_day: float = DEFAULT_DECAY_PER_DAY,
+) -> tuple[float, float]:
+    """Read-time (rating, uncertainty) for an edge -- the Phase-3 trust signal.
+
+    Prefers the PERSISTED confidence written on ingest (Phase 1-2: corroborated on
+    re-assertion, contested on contradiction), applying read-time decay via the
+    canonical ``with_time_decay``. A ``confirmed`` (user-stated) fact is pinned --
+    full trust, exempt from decay. Falls back to the stock-field
+    ``heuristic_confidence`` for edges that predate the persisted write-path
+    (``confidence_last_touched_at`` is None), so this works against stock core too.
+    """
+    if getattr(edge, 'confirmed', False):
+        return 1.0, 0.0  # pinned ground truth -- never decays
+
+    last_touched = getattr(edge, 'confidence_last_touched_at', None)
+    if last_touched is None:
+        return heuristic_confidence(edge, now, decay_per_day=decay_per_day)
+
+    decayed = with_time_decay(
+        Confidence(
+            rating=edge.confidence_rating,
+            uncertainty=edge.confidence_uncertainty,
+            last_touched_at=last_touched,
+            corroboration_count=getattr(edge, 'corroboration_count', 1),
+        ),
+        now,
+    )
+    rating, uncertainty = decayed.rating, decayed.uncertainty
+    if edge.expired_at is not None or (
+        edge.invalid_at is not None and _ensure_aware(edge.invalid_at) <= now
+    ):
+        rating *= 0.5
+        uncertainty += 0.2
+    return min(max(rating, 0.0), 1.0), min(max(uncertainty, 0.0), 1.0)
+
+
 def compose_ambient_block(
     edges: list[EntityEdge],
     *,
@@ -280,13 +320,17 @@ def compose_ambient_block(
         if edge.expired_at is not None:
             continue  # superseded fact -- proactive injection wants current truth
 
+        expires = getattr(edge, 'expires_at', None)
+        if expires is not None and _ensure_aware(expires) <= now:
+            continue  # past its validity horizon (TTL) -- e.g. "OOO until Friday"
+
         relevance = None if relevance_by_uuid is None else relevance_by_uuid.get(edge.uuid, 0.0)
         if relevance is not None and relevance < min_relevance:
             continue  # not salient to the current conversation -- stay silent
 
-        rating, uncertainty = heuristic_confidence(edge, now, decay_per_day=decay_per_day)
+        rating, uncertainty = effective_confidence(edge, now, decay_per_day=decay_per_day)
         if rating < min_rating or uncertainty > uncertainty_threshold:
-            continue  # confidence gate
+            continue  # confidence gate (persisted confidence w/ decay, else heuristic)
 
         tokens = _content_tokens(edge.fact)
         if any(_containment(tokens, seen) >= dedup_containment for seen in admitted_tokens):
