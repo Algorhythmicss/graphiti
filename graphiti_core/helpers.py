@@ -65,6 +65,16 @@ def parse_db_date(input_date: neo4j_time.DateTime | str | None) -> datetime | No
     return input_date
 
 
+def coalesce(value, default):
+    """Return ``default`` when ``value`` is None.
+
+    For reading a newly-added non-optional DB column that is NULL on edges/nodes
+    written before the column existed -- passing NULL straight into a typed field
+    would raise, so it falls back to the field default.
+    """
+    return default if value is None else value
+
+
 def get_default_group_id(provider: GraphProvider) -> str:
     """
     This function differentiates the default group id based on the database type.

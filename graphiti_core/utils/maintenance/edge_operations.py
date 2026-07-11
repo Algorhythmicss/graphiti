@@ -41,10 +41,40 @@ from graphiti_core.search.search import search
 from graphiti_core.search.search_config import SearchResults
 from graphiti_core.search.search_config_recipes import EDGE_HYBRID_SEARCH_RRF
 from graphiti_core.search.search_filters import SearchFilters
+from graphiti_core.utils.confidence import Confidence, contest, corroborate
 from graphiti_core.utils.datetime_utils import ensure_utc, utc_now
 from graphiti_core.utils.maintenance.attribute_utils import apply_capped_attributes
 from graphiti_core.utils.maintenance.dedup_helpers import _normalize_string_exact
 from graphiti_core.utils.text_utils import concatenate_episodes
+
+
+def _edge_confidence(edge: EntityEdge) -> Confidence:
+    return Confidence(
+        rating=edge.confidence_rating,
+        uncertainty=edge.confidence_uncertainty,
+        last_touched_at=edge.confidence_last_touched_at,
+        corroboration_count=edge.corroboration_count,
+    )
+
+
+def _write_confidence(edge: EntityEdge, conf: Confidence) -> None:
+    edge.confidence_rating = conf.rating
+    edge.confidence_uncertainty = conf.uncertainty
+    edge.confidence_last_touched_at = conf.last_touched_at
+    edge.corroboration_count = conf.corroboration_count
+
+
+def _apply_corroboration(edge: EntityEdge, episode: EpisodicNode | None) -> None:
+    """A new episode re-asserts this fact: raise rating, narrow uncertainty, +1 count."""
+    now = (episode.valid_at if episode is not None else None) or utc_now()
+    _write_confidence(edge, corroborate(_edge_confidence(edge), now))
+
+
+def _apply_contest(edge: EntityEdge, episode: EpisodicNode | None) -> None:
+    """A new fact contradicts this one: lower rating, widen uncertainty."""
+    now = (episode.valid_at if episode is not None else None) or utc_now()
+    _write_confidence(edge, contest(_edge_confidence(edge), now))
+
 
 logger = logging.getLogger(__name__)
 
@@ -296,6 +326,11 @@ async def extract_edges(
         if not edge_episode_uuids:
             edge_episode_uuids = [ep.uuid for ep in episodes]
 
+        ref_time = (
+            episodes[edge_data.episode_indices[0]].valid_at
+            if edge_data.episode_indices and 0 <= edge_data.episode_indices[0] < len(episodes)
+            else primary_episode.valid_at
+        )
         edge = EntityEdge(
             source_node_uuid=source_node_uuid,
             target_node_uuid=target_node_uuid,
@@ -306,11 +341,11 @@ async def extract_edges(
             created_at=utc_now(),
             valid_at=valid_at_datetime,
             invalid_at=invalid_at_datetime,
-            reference_time=(
-                episodes[edge_data.episode_indices[0]].valid_at
-                if edge_data.episode_indices and 0 <= edge_data.episode_indices[0] < len(episodes)
-                else primary_episode.valid_at
-            ),
+            reference_time=ref_time,
+            # Anchor confidence decay to when the fact was first observed. Rating /
+            # uncertainty / count keep their model defaults (a single, not-yet-
+            # corroborated source); corroborate()/contest() move them from there.
+            confidence_last_touched_at=ref_time,
         )
         edges.append(edge)
         logger.debug(
@@ -692,6 +727,7 @@ async def resolve_extracted_edge(
             resolved = edge
             if episode is not None and episode.uuid not in resolved.episodes:
                 resolved.episodes.append(episode.uuid)
+                _apply_corroboration(resolved, episode)  # a genuinely new episode re-asserts it
             return resolved, [], []
 
     start = time()
@@ -748,8 +784,11 @@ async def resolve_extracted_edge(
         resolved_edge = related_edges[duplicate_fact_id]
         break
 
-    if duplicate_fact_ids and episode is not None:
+    if duplicate_fact_ids and episode is not None and episode.uuid not in resolved_edge.episodes:
+        # Guard on 'not already present' so a replay of the same episode does not
+        # inflate confidence; append THEN corroborate the reused existing edge.
         resolved_edge.episodes.append(episode.uuid)
+        _apply_corroboration(resolved_edge, episode)
 
     # Process contradicted facts (continuous indexing across both lists)
     contradicted_facts: list[int] = response_object.contradicted_facts
@@ -843,6 +882,14 @@ async def resolve_extracted_edge(
         resolved_edge, invalidation_candidates
     )
     duplicate_edges: list[EntityEdge] = [related_edges[idx] for idx in duplicate_fact_ids]
+
+    # Contest each contradicted edge (lower rating, widen uncertainty) -- but not
+    # one that is also a duplicate being corroborated this same turn, to avoid
+    # simultaneously rewarding and penalizing the same edge.
+    duplicate_uuids = {e.uuid for e in duplicate_edges}
+    for inv_edge in invalidated_edges:
+        if inv_edge.uuid not in duplicate_uuids:
+            _apply_contest(inv_edge, episode)
 
     return resolved_edge, invalidated_edges, duplicate_edges
 

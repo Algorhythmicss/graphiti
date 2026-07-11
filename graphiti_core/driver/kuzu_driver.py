@@ -94,6 +94,12 @@ SCHEMA_QUERIES = """
         valid_at TIMESTAMP,
         invalid_at TIMESTAMP,
         reference_time TIMESTAMP,
+        confidence_rating DOUBLE,
+        confidence_uncertainty DOUBLE,
+        confidence_last_touched_at TIMESTAMP,
+        corroboration_count INT64,
+        expires_at TIMESTAMP,
+        confirmed BOOLEAN,
         attributes STRING
     );
     CREATE REL TABLE IF NOT EXISTS RELATES_TO(

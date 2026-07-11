@@ -28,7 +28,7 @@ from typing_extensions import LiteralString
 from graphiti_core.driver.driver import GraphDriver, GraphProvider
 from graphiti_core.embedder import EmbedderClient
 from graphiti_core.errors import EdgeNotFoundError, GroupsEdgesNotFoundError
-from graphiti_core.helpers import parse_db_date
+from graphiti_core.helpers import coalesce, parse_db_date
 from graphiti_core.models.edges.edge_db_queries import (
     COMMUNITY_EDGE_RETURN,
     EPISODIC_EDGE_RETURN,
@@ -44,6 +44,18 @@ from graphiti_core.models.edges.edge_db_queries import (
 from graphiti_core.nodes import Node
 
 logger = logging.getLogger(__name__)
+
+# First-class EntityEdge trust-layer columns (confidence + validity horizon +
+# pinned). Listed once so every read path pops them out of the generic
+# properties(e) attributes bag in lockstep.
+_TRUST_FIELDS = (
+    'confidence_rating',
+    'confidence_uncertainty',
+    'confidence_last_touched_at',
+    'corroboration_count',
+    'expires_at',
+    'confirmed',
+)
 
 
 class Edge(BaseModel, ABC):
@@ -280,6 +292,28 @@ class EntityEdge(Edge):
     reference_time: datetime | None = Field(
         default=None, description='reference timestamp from the episode that produced this edge'
     )
+    # Trust layer (see graphiti_core/utils/confidence.py). Defaults chosen so
+    # legacy edges without these properties still deserialize sensibly.
+    confidence_rating: float = Field(
+        default=0.75, description='how likely this fact is currently true (~0-1)'
+    )
+    confidence_uncertainty: float = Field(
+        default=0.5, description='how little recent corroboration; widens with age, narrows on corroboration'
+    )
+    confidence_last_touched_at: datetime | None = Field(
+        default=None, description='when confidence was last updated by evidence (anchor for read-time decay)'
+    )
+    corroboration_count: int = Field(
+        default=1, description='number of independent episodes asserting this fact'
+    )
+    expires_at: datetime | None = Field(
+        default=None,
+        description='hard validity horizon for ephemeral facts ("OOO until Friday"); dropped after this',
+    )
+    confirmed: bool = Field(
+        default=False,
+        description='user-stated/confirmed ground truth; exempt from confidence decay and pruning',
+    )
     attributes: dict[str, Any] = Field(
         default={}, description='Additional attributes of the edge. Dependent on edge name'
     )
@@ -353,6 +387,12 @@ class EntityEdge(Edge):
             'valid_at': self.valid_at,
             'invalid_at': self.invalid_at,
             'reference_time': self.reference_time,
+            'confidence_rating': self.confidence_rating,
+            'confidence_uncertainty': self.confidence_uncertainty,
+            'confidence_last_touched_at': self.confidence_last_touched_at,
+            'corroboration_count': self.corroboration_count,
+            'expires_at': self.expires_at,
+            'confirmed': self.confirmed,
         }
 
         if driver.provider == GraphProvider.KUZU:
@@ -984,6 +1024,8 @@ def get_entity_edge_from_record(record: Any, provider: GraphProvider) -> EntityE
         attributes.pop('valid_at', None)
         attributes.pop('invalid_at', None)
         attributes.pop('reference_time', None)
+        for trust_field in _TRUST_FIELDS:
+            attributes.pop(trust_field, None)
 
     edge = EntityEdge(
         uuid=record['uuid'],
@@ -999,6 +1041,12 @@ def get_entity_edge_from_record(record: Any, provider: GraphProvider) -> EntityE
         valid_at=parse_db_date(record['valid_at']),
         invalid_at=parse_db_date(record['invalid_at']),
         reference_time=parse_db_date(record.get('reference_time')),
+        confidence_rating=coalesce(record.get('confidence_rating'), 0.75),
+        confidence_uncertainty=coalesce(record.get('confidence_uncertainty'), 0.5),
+        confidence_last_touched_at=parse_db_date(record.get('confidence_last_touched_at')),
+        corroboration_count=coalesce(record.get('corroboration_count'), 1),
+        expires_at=parse_db_date(record.get('expires_at')),
+        confirmed=coalesce(record.get('confirmed'), False),
         attributes=attributes,
     )
 

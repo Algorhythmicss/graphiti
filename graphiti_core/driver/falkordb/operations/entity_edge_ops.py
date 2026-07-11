@@ -52,6 +52,13 @@ class FalkorEntityEdgeOperations(EntityEdgeOperations):
             'expired_at': edge.expired_at,
             'valid_at': edge.valid_at,
             'invalid_at': edge.invalid_at,
+            'reference_time': edge.reference_time,
+            'confidence_rating': edge.confidence_rating,
+            'confidence_uncertainty': edge.confidence_uncertainty,
+            'confidence_last_touched_at': edge.confidence_last_touched_at,
+            'corroboration_count': edge.corroboration_count,
+            'expires_at': edge.expires_at,
+            'confirmed': edge.confirmed,
         }
         edge_data.update(edge.attributes or {})
 
@@ -85,6 +92,13 @@ class FalkorEntityEdgeOperations(EntityEdgeOperations):
                 'expired_at': edge.expired_at,
                 'valid_at': edge.valid_at,
                 'invalid_at': edge.invalid_at,
+                'reference_time': edge.reference_time,
+                'confidence_rating': edge.confidence_rating,
+                'confidence_uncertainty': edge.confidence_uncertainty,
+                'confidence_last_touched_at': edge.confidence_last_touched_at,
+                'corroboration_count': edge.corroboration_count,
+                'expires_at': edge.expires_at,
+                'confirmed': edge.confirmed,
             }
             edge_data.update(edge.attributes or {})
             prepared.append(edge_data)

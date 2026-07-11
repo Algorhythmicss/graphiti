@@ -16,8 +16,8 @@ limitations under the License.
 
 from typing import Any
 
-from graphiti_core.edges import EntityEdge
-from graphiti_core.helpers import parse_db_date
+from graphiti_core.edges import _TRUST_FIELDS, EntityEdge
+from graphiti_core.helpers import coalesce, parse_db_date
 from graphiti_core.nodes import CommunityNode, EntityNode, EpisodeType, EpisodicNode
 
 
@@ -66,6 +66,8 @@ def entity_edge_from_record(record: Any) -> EntityEdge:
     attributes.pop('valid_at', None)
     attributes.pop('invalid_at', None)
     attributes.pop('reference_time', None)
+    for trust_field in _TRUST_FIELDS:
+        attributes.pop(trust_field, None)
 
     return EntityEdge(
         uuid=record['uuid'],
@@ -81,6 +83,12 @@ def entity_edge_from_record(record: Any) -> EntityEdge:
         valid_at=parse_db_date(record['valid_at']),
         invalid_at=parse_db_date(record['invalid_at']),
         reference_time=parse_db_date(record.get('reference_time')),
+        confidence_rating=coalesce(record.get('confidence_rating'), 0.75),
+        confidence_uncertainty=coalesce(record.get('confidence_uncertainty'), 0.5),
+        confidence_last_touched_at=parse_db_date(record.get('confidence_last_touched_at')),
+        corroboration_count=coalesce(record.get('corroboration_count'), 1),
+        expires_at=parse_db_date(record.get('expires_at')),
+        confirmed=coalesce(record.get('confirmed'), False),
         attributes=attributes,
     )
 
