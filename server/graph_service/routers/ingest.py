@@ -8,6 +8,7 @@ from graphiti_core.utils.maintenance.graph_data_operations import clear_data  # 
 
 from graph_service.config import get_settings
 from graph_service.dto import AddEntityNodeRequest, AddMessagesRequest, Message, Result
+from graph_service.ontology import KYRA_EDGE_TYPE_MAP, KYRA_EDGE_TYPES, KYRA_ENTITY_TYPES
 from graph_service.zep_graphiti import ZepGraphitiDep, build_graphiti
 
 
@@ -71,6 +72,15 @@ async def add_messages(
                 reference_time=m.timestamp,
                 source=EpisodeType.message,
                 source_description=m.source_description,
+                # Typed memory (derived from evidence -- see ontology.py): nouns
+                # become typed nodes (Person/Organization/Project); ACTIONS become
+                # typed edges (COMMITMENT/TASK/MEETING) carrying due_date / status /
+                # direction so downstream can act on them. Types are a signal, not
+                # a dedup key -- Graphiti's candidate search is label-agnostic, so
+                # this does not fragment entities.
+                entity_types=KYRA_ENTITY_TYPES,
+                edge_types=KYRA_EDGE_TYPES,
+                edge_type_map=KYRA_EDGE_TYPE_MAP,
             )
         finally:
             await client.close()
