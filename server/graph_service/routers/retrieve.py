@@ -5,9 +5,12 @@ from fastapi import APIRouter, status
 
 from graph_service.ambient import compose_ambient_block, cosine_similarity, self_uuid_for_group
 from graph_service.config import ZepEnvDep
+from graph_service.context_assembly import assemble_memory_context
 from graph_service.dto import (
     AmbientContextRequest,
     AmbientContextResponse,
+    GetContextRequest,
+    GetContextResponse,
     GetMemoryRequest,
     GetMemoryResponse,
     Message,
@@ -61,6 +64,22 @@ async def get_memory(
     )
     facts = [get_fact_result_from_edge(edge) for edge in result]
     return GetMemoryResponse(facts=facts)
+
+
+@router.post('/get-context', status_code=status.HTTP_200_OK)
+async def get_context(request: GetContextRequest, graphiti: ZepGraphitiDep):
+    """Reactive memory context: the benchmark-proven three-channel assembly
+    (validity-window facts + entity profiles + semantically-ranked raw episodes;
+    retrieve-ALL facts for counting queries). Always answers -- no salience gate."""
+    block, parts = await assemble_memory_context(
+        graphiti,
+        request.group_id,
+        request.query,
+        top_k=request.top_k,
+        max_episodes=request.max_episodes,
+        episode_char_budget=request.episode_char_budget,
+    )
+    return GetContextResponse(context=block, **parts)
 
 
 @router.post('/get-ambient-context', status_code=status.HTTP_200_OK)

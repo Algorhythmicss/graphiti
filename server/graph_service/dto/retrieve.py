@@ -135,6 +135,23 @@ class AmbientContextRequest(BaseModel):
     )
 
 
+class GetContextRequest(BaseModel):
+    group_id: str = Field(..., description='The memory namespace to draw from')
+    query: str = Field(..., description='The question or retrieval cue')
+    top_k: int = Field(default=40, ge=1, le=200, description='Fact search depth')
+    max_episodes: int = Field(default=8, ge=1, le=20, description='Raw episodes to include')
+    episode_char_budget: int = Field(
+        default=48000, ge=2000, le=200000, description='Total char budget across episodes'
+    )
+
+
+class GetContextResponse(BaseModel):
+    context: str = Field(..., description='Ready-to-inject reader context block')
+    facts: list[str] = Field(default_factory=list)
+    profiles: list[str] = Field(default_factory=list)
+    episodes: list[str] = Field(default_factory=list)
+
+
 class AmbientContextResponse(BaseModel):
     injection_block: str = Field(
         ..., description='Ready-to-inject text; [i] lines index into citations'
