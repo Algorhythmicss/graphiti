@@ -44,8 +44,14 @@ def _edge_date(e: EntityEdge) -> str:
 
 
 def _edge_validity(e: EntityEdge) -> str:
-    end = e.invalid_at.strftime('%Y-%m-%d') if e.invalid_at else 'Present'
-    return f'[{_edge_date(e)} -> {end}] {e.fact}'
+    # Benchmark-proven: an explicit SUPERSEDED tag is respected where validity-
+    # window notation alone is not (marking beats instructing).
+    if e.invalid_at:
+        return (
+            f'[SUPERSEDED on {e.invalid_at:%Y-%m-%d} -- OUTDATED, do not answer with this] '
+            f'[{_edge_date(e)}] {e.fact}'
+        )
+    return f'[{_edge_date(e)} -> Present] {e.fact}'
 
 
 def format_facts(edges: list[EntityEdge]) -> list[str]:
@@ -99,9 +105,11 @@ def assemble_context_block(facts: list[str], profiles: list[str], episodes: list
     eb = '\n---\n'.join(episodes) or '(none)'
     return (
         'MEMORY CONTEXT\n'
-        'Facts are valid between their bracketed dates; an end of "Present" means '
-        'currently true. A later-dated statement supersedes an earlier one.\n\n'
-        f'ENTITY PROFILES:\n{pb}\n\n'
+        'Dated FACTS are authoritative. Facts marked SUPERSEDED are outdated -- never '
+        'answer from them. An end of "Present" means currently true; a later-dated '
+        'statement supersedes an earlier one, even if stated in passing.\n\n'
+        f'ENTITY PROFILES (may contain stale values; when they disagree with a dated '
+        f'fact, trust the fact):\n{pb}\n\n'
         f'FACTS (chronological):\n{fb}\n\n'
         f'CONVERSATION EVIDENCE (chronological):\n{eb}'
     )

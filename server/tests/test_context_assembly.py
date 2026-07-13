@@ -50,7 +50,8 @@ def test_facts_chronological_with_validity_windows():
     facts = format_facts(
         [edge('newer', days_ago=1), edge('older', days_ago=10, invalid_days_ago=1)]
     )
-    assert facts[0].endswith('older') and '-> 2026-07-11]' in facts[0]  # closed window
+    # closed window -> explicit SUPERSEDED tag (marking beats instructing)
+    assert facts[0].endswith('older') and facts[0].startswith('[SUPERSEDED on 2026-07-11')
     assert facts[1].endswith('newer') and '-> Present]' in facts[1]  # current truth
 
 
@@ -78,5 +79,5 @@ def test_rank_episodes_semantic_dedup_budget_and_datestamp():
 
 def test_block_carries_validity_instruction():
     block = assemble_context_block(['[d -> Present] f'], ['P: s'], ['[SESSION DATE: d]\ne'])
-    assert '"Present" means currently true' in block or 'Present' in block
+    assert '"Present" means currently true (or SUPERSEDED tags)' in block or 'Present' in block
     assert 'ENTITY PROFILES' in block and 'FACTS' in block and 'CONVERSATION EVIDENCE' in block
