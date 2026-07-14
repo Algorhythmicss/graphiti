@@ -1,0 +1,58 @@
+# Memory-Layer Benchmark Runbook
+
+Harnesses validating the Kyra memory layer. Read `/KYRA_MEMORY_LAYER.md` first.
+
+## Results so far (2026-07-14)
+
+- **LongMemEval-oracle n=60 (10/type): 90%** — temporal 100, single-session 100×2, KU 90,
+  pref 90, multi-session 60 (75% non-error). Zep's recipe in this same harness: 58%.
+- **LoCoMo n=50 (2 convs, stratified): 78%** — multi-hop 83, temporal 82, single-hop 82,
+  adversarial 73, open-domain 60. No per-question tuning.
+- Full-size runs NOT done. Pre-registered predictions: LME-500 ≈76%, LoCoMo-full ≈74%.
+
+## Setup
+
+- FalkorDB: `docker run -d --name graphiti-ambient-demo -p 6379:6379 falkordb/falkordb:latest`
+- `OPENAI_API_KEY` in repo-root `.env`. Datasets: `longmemeval_oracle.json`
+  (HuggingFace xiaowu0162/longmemeval-cleaned) and `locomo/data/locomo10.json`
+  (github snap-research/locomo) placed next to the harness.
+- Run from `server/`: `uv run python evals/longmemeval_harness.py` (env-config below).
+- **Keep the Mac awake** (`caffeinate -i` + lid open) or the run stalls on dead sockets.
+
+## LongMemEval
+
+```bash
+OPENAI_API_KEY=... ARM=ours PER_TYPE=10 CHUNK_TURNS=2 CONCURRENCY=2 \
+  SKIP_INGEST=0 USE_ONTOLOGY=0 TOP_K=40 READER_MODEL=gpt-4.1 \
+  uv run python evals/longmemeval_harness.py
+```
+
+Knobs: `PER_TYPE` (10=60q, 200=full 500) · `CHUNK_TURNS=2` turn-pair episodes (**the** structural
+fix — 0 = whole-session, scores much lower) · `SKIP_INGEST=1` QA-only on existing graphs ·
+`INGEST_ONLY=1` · `QTYPE_FILTER` / `QID_FILTER` for micro-tests (~$0.30) · `ARM=zep` runs
+Graphiti's own recipe (cross-encoder + their context string) as the baseline arm.
+
+Results → `longmemeval_results.out`. Ingest is **idempotent** (skips populated per-qid graphs):
+resume after a stall by re-running; `GRAPH.DELETE` any instance that was mid-ingest.
+
+## LoCoMo
+
+```bash
+OPENAI_API_KEY=... N_CONV=2 QA_PER_CONV=25 CHUNK_TURNS=2 CONCURRENCY=2 \
+  uv run python evals/locomo_harness.py
+```
+
+Full run: `N_CONV=10 QA_PER_CONV=999` (~$60–80, ~15–18h at 30k TPM). **TODO before full run:**
+add incremental result writing (a crash in QA currently loses paid answers).
+
+## recall_diag.py — use this first
+
+Reader-free evidence-recall (did retrieval surface the gold `has_answer` turns?). ~Free
+(embeddings only) — the right metric for retrieval iteration; never burn reader money tuning
+retrieval. Current: semantic-episode 86% vs edge-ref 79%.
+
+## Cost discipline (learned the hard way)
+
+Reader+judge (gpt-4.1 × N) is the cost; ingest is mini. Micro-test pattern: fix → rerun ONLY the
+failing qids (`QID_FILTER`, ~$0.30) → verify → next. Decouple ingest from QA. One LLM job at a
+time (30k TPM). Never trust a run with ERRs in it — errors score as wrong and fake regressions.

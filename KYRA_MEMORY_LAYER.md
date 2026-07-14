@@ -1,0 +1,127 @@
+# Kyra Memory Layer — Master Handoff Doc
+
+> **Read this first.** This file lets a fresh contributor (human or model) pick up the entire
+> project in one pass. Companion: `server/evals/README.md` (benchmark runbook).
+> Last updated: 2026-07-14.
+
+## 1. Mission
+
+**Kyra** (trykyra.io) is a proactive cross-app communication assistant ("one interface for
+everything that needs your attention" — Slack/Gmail/WhatsApp/Teams/calendar; iOS/macOS app first,
+minimal smart-glasses+ring later). This repo (a fork of getzep/graphiti) hosts its
+**memory-context layer**: ingest conversations/emails/messages → temporally-aware knowledge graph
+→ serve **reactive** (query→context) and **proactive** (rolling window→briefing-or-SILENCE)
+retrieval. Target: a genuinely SOTA, widely-usable memory layer.
+
+A separate repo `/Users/mac/memory-engine` is a research prototype: **port its ideas, never its
+code** (it deliberately keeps heavy research baggage).
+
+## 2. Where everything lives
+
+- **Fork remote**: `fork` = github.com/Algorhythmicss/graphiti (push here). `origin` =
+  getzep/graphiti (**NEVER push**). PR #1 (merged): the whole layer. PR #2 (open): Phases 5–7.
+- `server/graph_service/ambient.py` — proactive assembly: two-level salience gate
+  (block-level "should I speak at all" + per-fact floor), relevance-first fill, content near-dup
+  guard, soft per-entity cap, token budget, `effective_confidence` (persisted w/ decay, pinned,
+  TTL), citations with why-chains.
+- `server/graph_service/context_assembly.py` — reactive `/get-context`: three-channel context
+  (SUPERSEDED-tagged validity-window facts [authoritative] + entity profiles [advisory] +
+  semantically-ranked raw episodes), retrieve-ALL facts for counting queries.
+- `server/graph_service/consolidation.py` — Phase 5 job: TTL sweep + stale-summary regeneration
+  from open facts, **withholding the old summary** from the LLM. `POST /consolidate/{group_id}`.
+- `server/graph_service/decision_trace.py` — Phase 6: DecisionTrace ledger per ambient call,
+  `POST /ambient-outcome` (engaged/dismissed/ignored), 4h proactive suppression.
+- `server/graph_service/ontology.py` — evidence-driven: nouns = entity types
+  (Person/Organization/Project); **actions = EDGE types** (COMMITMENT/TASK/MEETING/WORKS_AT/
+  PREFERENCE) with structured attrs (due_date, status, direction). Types are a SIGNAL never a
+  dedup key.
+- `graphiti_core/utils/confidence.py` — (rating, uncertainty) + corroborate/contest/read-time
+  decay. Wired into `edge_operations.py` (corroborate on re-assertion, contest on contradiction).
+  Six trust columns persisted on EntityEdge across Neo4j/Falkor/Kuzu.
+- `graphiti_core/prompts/extract_edges.py` rule 6 — **in-passing/subordinate-clause facts MUST be
+  extracted** (measured fix: "my snake plant, which I got from my sister" class).
+- `server/evals/` — LongMemEval + LoCoMo harnesses + reader-free `recall_diag.py`.
+
+## 3. Benchmark journey + honest numbers
+
+`8% → 57% → 67% plateau → root-caused fix stack → 90%` on LongMemEval-oracle (n=60, 10/type),
+**LoCoMo 78%** (n=50, 2 convs, ZERO per-question tuning — the cleaner number).
+References measured in OUR harness: Zep's own recipe = 58%. Published: Zep 71.2% (on
+LongMemEval-**S**, not oracle — don't conflate), Mem0 ~66–68% LoCoMo.
+
+**The fix stack (each traced to root cause; see git log):**
+1. **Chunked/message-grain ingestion** (CHUNK_TURNS=2) — THE structural fix: session-level
+   extraction drops enumerable items. multi-session 20→86%, temporal 40→100% non-error.
+   Kyra's server already ingests one message/episode — the product grain is correct.
+2. **In-passing extraction rule** (core prompt) — subordinate-clause facts.
+3. **SUPERSEDED tags** on closed-window facts — **marking beats instructing** (three instruction
+   variants failed; the explicit tag fixed knowledge-update stale-value picks). Graphiti's
+   contradiction-invalidation was already setting invalid_at correctly.
+4. **Facts-authoritative-over-profiles** — unversioned node summaries leak stale values (the
+   consolidation job is the write-side fix).
+5. Retrieve-ALL facts for counting (ranking is wrong for enumeration); split evidence char budget
+   (flat truncation cut answers); multi-query event decomposition; pref-mode reader
+   (recommend from stated interests, never abstain) + alignment-style preference judging;
+   date-math + latest-supersedes reader rules; FINAL-line parsing.
+
+**Full-size predictions (registered BEFORE running, 2026-07-14):** LME-500 ≈ **76%** (70–80) —
+the full set is 53% temporal+multi-session (our weakest), and the 60 had adaptive tuning.
+LoCoMo-1986 ≈ **74%** (69–78). Costs: LME-500 ~$35–50/~8h; LoCoMo-full ~$60–80/~15–18h
+(30k-TPM gpt-4.1 bound). NOT yet run (credits). If results land ±4 of prediction, the loop
+measured honestly.
+
+## 4. Hard-won infra gotchas (will bite you)
+
+- **FalkorDB is multi-graph**: each `group_id` = its own graph. Search/reads on an unscoped
+  driver hit an empty default graph → **reader answers from nothing** (this faked our first 8%).
+  Use `Graphiti(FalkorDriver(database=group_id))` for BOTH ingest and QA; ALSO
+  `build_indices_and_constraints()` explicitly (background index build races QA). Neo4j
+  (production) is single-graph — unaffected.
+- **Mac sleep kills runs**: `caffeinate -i` stops idle-sleep only, not lid-close. Sleep = dead
+  sockets = cascades of timeouts, partial ingests. Harness ingest is idempotent → resume by
+  re-running; clear partial graphs first if an instance was mid-ingest.
+- **OpenAI org limits**: gpt-4.1 TPM = 30k → ~2-3 reader calls/min at 10k-token contexts;
+  concurrency 1–2 + retry (12 tries, 75s cap — must outlast a full TPM window). Mini is fine at
+  concurrency 3.
+- Attribute-extraction on gpt-4.1-mini occasionally emits ~78k-char degenerate JSON → retry/skip
+  (harness handles). `resolve_extracted_edge` **wipes edge.attributes** for unmatched relation
+  types — never store trust/provenance data in attributes; first-class columns only.
+- Two edge-rehydration pop-lists must stay in lockstep: `edges.py:get_entity_edge_from_record` and
+  `driver/record_parsers.py` (plus `bulk_utils.py` builds its own edge_data — 3 write paths!).
+
+## 5. Open ends (ranked next work)
+
+1. **Full-500 LongMemEval + full LoCoMo** — say-go-and-fire; harnesses ready. Add incremental
+   result writing to the LoCoMo harness first (QA restart risk = ~$45).
+2. **App integration** — nothing consumes `/get-context`, `/get-ambient-context`,
+   `/ambient-outcome` yet. The Phase-6 learning loop needs real outcomes. Includes cross-app
+   scope re-filter + behavioral preference inference (needs app signals: reply latency, etc.).
+3. **Usefulness boost** — OFF by design until outcome data accrues (clamp [0.3, 1.5],
+   reactive-only; injection-recency is a SUPPRESSION signal proactively).
+4. **Salience calibration** — floors (block 0.40 / fact 0.22) calibrated on one demo corpus with
+   text-embedding-3-small; retune per embedding model. Named-criteria factorization
+   (urgency/commitment/actionable/novelty) designed, not built.
+5. **Self-entity binding** — deterministic uuid (`self_uuid_for_group`) wired as exclusion key;
+   ingest binding + extraction carve-out (first-person pronoun ban conflicts) NOT done.
+6. **Verbatim-quote provenance** (supporting_quote → char offsets) — schema fields exist on
+   Citation, extraction not wired.
+7. **Identity/who's-who differentiator** — EmoryNLP Friends coref test (same-name collisions);
+   the moat competitors can't measure. See memory `generalization-dataset-choice`.
+8. **Known extraction tails**: relative-clause counting items still occasionally dropped;
+   node summaries regenerate only via consolidation (run it on a cron).
+
+## 6. Likely failure points (pre-registered)
+
+- Temporal at scale (133 q) — widest question variety, thinnest verified sample (n=10).
+- Multi-session counting semantics ambiguity ("pick up OR return" = 2 or 3?).
+- SUPERSEDED depends on graphiti invalidation firing — inconsistent for implicit updates.
+- Salience floors on a different embedding model or non-self-centric graph.
+- FalkorDB-only quirks (NUL-strip, ISO-string dates) vs the Neo4j production path — the eval
+  substrate ≠ prod substrate.
+
+## 7. Session memory
+
+Claude sessions also persist notes at `~/.claude/projects/-Users-mac-graphiti-local/memory/`
+(`kyra-memory-layer.md`, `benchmark-findings.md`, `memory-systems-learnings.md`,
+`generalization-dataset-choice.md`) — richer narrative + the Mem0/Letta/HydraDB adopt/skip list.
+This file is the canonical repo-resident summary.
