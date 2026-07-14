@@ -9,6 +9,7 @@ from graph_service.context_assembly import assemble_memory_context
 from graph_service.dto import (
     AmbientContextRequest,
     AmbientContextResponse,
+    AmbientOutcomeRequest,
     GetContextRequest,
     GetContextResponse,
     GetMemoryRequest,
@@ -157,10 +158,41 @@ async def get_ambient_context(
                 'ambient salience scoring failed; proceeding without the gate', exc_info=True
             )
 
+    now = datetime.now(timezone.utc)
+
+    # Phase 6 -- proactive suppression: drop facts injected recently (unlabeled or
+    # dismissed traces); a proactive assistant that repeats itself gets muted.
+    from graph_service.decision_trace import (
+        build_trace,
+        load_recent_traces,
+        save_trace,
+        suppressed_uuids,
+    )
+
+    try:
+        recent = await load_recent_traces(graphiti.driver, request.group_id)
+        suppressed = suppressed_uuids(recent, now)
+        if suppressed:
+            edges = [e for e in edges if e.uuid not in suppressed]
+    except Exception:
+        logger.warning('suppression lookup failed; proceeding without', exc_info=True)
+
+    # Phase 7 legibility: entity names for the why-chain (one lookup per call).
+    names_by_uuid: dict[str, str] = {}
+    try:
+        from graphiti_core.nodes import EntityNode
+
+        uuids = {u for e in edges for u in (e.source_node_uuid, e.target_node_uuid)}
+        if uuids:
+            nodes = await EntityNode.get_by_uuids(graphiti.driver, list(uuids))
+            names_by_uuid = {n.uuid: n.name for n in nodes}
+    except Exception:
+        logger.warning('why-chain name lookup failed', exc_info=True)
+
     injection_block, citations = compose_ambient_block(
         edges,
         token_budget=token_budget,
-        now=datetime.now(timezone.utc),
+        now=now,
         self_uuid=self_uuid,
         relevance_by_uuid=relevance_by_uuid,
         min_top_relevance=min_top_relevance,
@@ -168,8 +200,42 @@ async def get_ambient_context(
         min_rating=request.min_rating,
         uncertainty_threshold=uncertainty_threshold,
         decay_per_day=settings.ambient_decay_per_day,
+        names_by_uuid=names_by_uuid or None,
     )
-    return AmbientContextResponse(injection_block=injection_block, citations=citations)
+
+    # Phase 6 -- decision-trace ledger: log what was considered and admitted.
+    trace_uuid = None
+    try:
+        trace = build_trace(
+            group_id=request.group_id,
+            window=window,
+            admitted_edge_uuids=[c.edge_uuid for c in citations],
+            considered=len(edges),
+            top_relevance=max(
+                (c.relevance for c in citations if c.relevance is not None), default=None
+            ),
+            spoke=bool(citations),
+            now=now,
+        )
+        await save_trace(graphiti.driver, trace)
+        trace_uuid = trace['uuid']
+    except Exception:
+        logger.warning('decision-trace write failed', exc_info=True)
+
+    return AmbientContextResponse(
+        injection_block=injection_block, citations=citations, trace_uuid=trace_uuid
+    )
+
+
+@router.post('/ambient-outcome', status_code=status.HTTP_200_OK)
+async def ambient_outcome(request: AmbientOutcomeRequest, graphiti: ZepGraphitiDep):
+    """Phase 6 -- label a past ambient injection: engaged | dismissed | ignored.
+    These labels are the dataset that tunes the salience gate (and gates the
+    future usefulness boost, clamp [0.3, 1.5], reactive-only)."""
+    from graph_service.decision_trace import record_outcome
+
+    found = await record_outcome(graphiti.driver, request.trace_uuid, request.outcome)
+    return {'updated': found}
 
 
 def compose_query_from_messages(messages: list[Message]):

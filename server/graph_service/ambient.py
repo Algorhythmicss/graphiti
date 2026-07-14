@@ -274,6 +274,7 @@ def compose_ambient_block(
     decay_per_day: float = DEFAULT_DECAY_PER_DAY,
     max_facts_per_entity: int = DEFAULT_MAX_FACTS_PER_ENTITY,
     dedup_containment: float = DEFAULT_DEDUP_CONTAINMENT,
+    names_by_uuid: dict[str, str] | None = None,
     token_counter=None,
 ) -> tuple[str, list[Citation]]:
     """Relevance-first fill of a TOKEN budget over the search ranking.
@@ -374,6 +375,13 @@ def compose_ambient_block(
                 uncertainty=round(uncertainty, 4),
                 contested=contested,
                 relevance=None if relevance is None else round(relevance, 4),
+                # Phase 7 legibility: the relation chain that surfaced this fact.
+                why=(
+                    f'{names_by_uuid.get(edge.source_node_uuid, "?")} —{edge.name}→ '
+                    f'{names_by_uuid.get(edge.target_node_uuid, "?")}'
+                    if names_by_uuid
+                    else None
+                ),
             )
         )
 

@@ -3,6 +3,7 @@ from .ingest import AddEntityNodeRequest, AddMessagesRequest
 from .retrieve import (
     AmbientContextRequest,
     AmbientContextResponse,
+    AmbientOutcomeRequest,
     Citation,
     FactResult,
     GetContextRequest,
@@ -28,4 +29,5 @@ __all__ = [
     'Citation',
     'AmbientContextRequest',
     'AmbientContextResponse',
+    'AmbientOutcomeRequest',
 ]

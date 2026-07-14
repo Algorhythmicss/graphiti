@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -87,6 +88,9 @@ class Citation(BaseModel):
     relevance: float | None = Field(
         default=None, description='Cosine similarity of the fact to the transcript window'
     )
+    why: str | None = Field(
+        default=None, description='Legibility: the relation chain that surfaced this fact'
+    )
     supporting_quote: str | None = Field(default=None, description='Verbatim source span (Slice 3)')
     char_start: int | None = Field(default=None, description='Start offset of the quote (Slice 3)')
     char_end: int | None = Field(default=None, description='End offset of the quote (Slice 3)')
@@ -152,7 +156,17 @@ class GetContextResponse(BaseModel):
     episodes: list[str] = Field(default_factory=list)
 
 
+class AmbientOutcomeRequest(BaseModel):
+    trace_uuid: str = Field(..., description='The trace to label')
+    outcome: Literal['engaged', 'dismissed', 'ignored'] = Field(
+        ..., description='What the user did'
+    )
+
+
 class AmbientContextResponse(BaseModel):
+    trace_uuid: str | None = Field(
+        default=None, description='Decision-trace id for outcome labeling'
+    )
     injection_block: str = Field(
         ..., description='Ready-to-inject text; [i] lines index into citations'
     )
