@@ -30,6 +30,13 @@ dev = [
     "graphiti-core[falkordb]>=0.28.2",
 ]
 
+# Consume the LOCAL graphiti_core fork (this repo's root) rather than the
+# published PyPI package, so server-side work can extend core (confidence,
+# provenance, self-entity) and have those edits take effect. Editable so fork
+# changes are picked up without reinstalling.
+[tool.uv.sources]
+graphiti-core = { path = "..", editable = true }
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"

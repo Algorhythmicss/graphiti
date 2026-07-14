@@ -157,8 +157,11 @@ You may use information from the PREVIOUS MESSAGES only to disambiguate referenc
 5. The `fact` MUST preserve all specific details from the source text: proper nouns, brand names, product names, model numbers, quantities, counts, colors, materials, physical descriptions, specific items, named locations, and named activities. Paraphrase the sentence structure but NEVER generalize:
    - NEVER generalize "Gamecube" to "gaming console", "Ford Mustang" to "car", "wool coat" to "coat", "red and purple lighting" to "lighting", "cracked windshield" to "car damage", or "three screenplays" to "several screenplays".
    - Do not verbatim quote the original text, but every concrete noun, number, and descriptor in the source should survive into the `fact`.
-6. Use `REFERENCE_TIME` to resolve vague or relative temporal expressions (e.g., "last week"). When the CURRENT_MESSAGE contains multiple episodes with per-episode timestamps, prefer the timestamp of the specific episode the fact originates from.
-7. Do **not** hallucinate or infer temporal bounds from unrelated events.
+6. Facts stated IN PASSING — in subordinate or relative clauses, asides, or as background while the speaker's main point is something else — MUST be extracted with the same priority as the main topic. The speaker's INTENT does not matter; every asserted fact counts.
+   - "Since I've been thinking about my recent family trip to Paris, I was wondering about Tokyo..." ALSO asserts: user took a family trip to Paris.
+   - "my snake plant, which I got from my sister last month, needs repotting" ALSO asserts: user got a snake plant from their sister last month.
+7. Use `REFERENCE_TIME` to resolve vague or relative temporal expressions (e.g., "last week"). When the CURRENT_MESSAGE contains multiple episodes with per-episode timestamps, prefer the timestamp of the specific episode the fact originates from.
+8. Do **not** hallucinate or infer temporal bounds from unrelated events.
 
 # RELATION TYPE RULES
 

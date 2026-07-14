@@ -205,6 +205,12 @@ async def add_nodes_and_edges_bulk_tx(
             'valid_at': edge.valid_at,
             'invalid_at': edge.invalid_at,
             'reference_time': edge.reference_time,
+            'confidence_rating': edge.confidence_rating,
+            'confidence_uncertainty': edge.confidence_uncertainty,
+            'confidence_last_touched_at': edge.confidence_last_touched_at,
+            'corroboration_count': edge.corroboration_count,
+            'expires_at': edge.expires_at,
+            'confirmed': edge.confirmed,
             'fact_embedding': edge.fact_embedding,
         }
 

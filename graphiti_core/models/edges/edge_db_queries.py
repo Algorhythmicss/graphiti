@@ -97,6 +97,12 @@ def get_entity_edge_save_query(provider: GraphProvider, has_aoss: bool = False) 
                     e.valid_at = $valid_at,
                     e.invalid_at = $invalid_at,
                     e.reference_time = $reference_time,
+                    e.confidence_rating = $confidence_rating,
+                    e.confidence_uncertainty = $confidence_uncertainty,
+                    e.confidence_last_touched_at = $confidence_last_touched_at,
+                    e.corroboration_count = $corroboration_count,
+                    e.expires_at = $expires_at,
+                    e.confirmed = $confirmed,
                     e.attributes = $attributes
                 RETURN e.uuid AS uuid
             """
@@ -162,6 +168,12 @@ def get_entity_edge_save_bulk_query(provider: GraphProvider, has_aoss: bool = Fa
                     e.valid_at = $valid_at,
                     e.invalid_at = $invalid_at,
                     e.reference_time = $reference_time,
+                    e.confidence_rating = $confidence_rating,
+                    e.confidence_uncertainty = $confidence_uncertainty,
+                    e.confidence_last_touched_at = $confidence_last_touched_at,
+                    e.corroboration_count = $corroboration_count,
+                    e.expires_at = $expires_at,
+                    e.confirmed = $confirmed,
                     e.attributes = $attributes
                 RETURN e.uuid AS uuid
             """
@@ -217,6 +229,13 @@ def get_entity_edge_return_query(provider: GraphProvider) -> str:
         e.expired_at AS expired_at,
         e.valid_at AS valid_at,
         e.invalid_at AS invalid_at,
+        e.reference_time AS reference_time,
+        e.confidence_rating AS confidence_rating,
+        e.confidence_uncertainty AS confidence_uncertainty,
+        e.confidence_last_touched_at AS confidence_last_touched_at,
+        e.corroboration_count AS corroboration_count,
+        e.expires_at AS expires_at,
+        e.confirmed AS confirmed,
     """ + (
         'e.attributes AS attributes'
         if provider == GraphProvider.KUZU
