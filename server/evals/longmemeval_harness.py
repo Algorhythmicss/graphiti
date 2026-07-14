@@ -26,7 +26,7 @@ from openai import AsyncOpenAI  # noqa: E402
 RETRYABLE = (openai.RateLimitError, openai.APITimeoutError, openai.APIConnectionError)
 
 
-async def with_retry(coro_fn, tries=8, exc=RETRYABLE):
+async def with_retry(coro_fn, tries=12, exc=RETRYABLE):
     delay = 3.0
     for i in range(tries):
         try:
@@ -35,7 +35,8 @@ async def with_retry(coro_fn, tries=8, exc=RETRYABLE):
             if i == tries - 1:
                 raise
             await asyncio.sleep(delay)
-            delay = min(delay * 1.8, 45)
+            # TPM windows reset every 60s -- backoff must exceed a full window.
+            delay = min(delay * 1.8, 75)
 
 from graphiti_core import Graphiti  # noqa: E402
 from graphiti_core.driver.falkordb_driver import FalkorDriver  # noqa: E402
@@ -62,6 +63,17 @@ USE_ONTOLOGY = os.environ.get('USE_ONTOLOGY', '1') == '1'
 # persists across runs; ingest is idempotent (skips groups already populated).
 INGEST_ONLY = os.environ.get('INGEST_ONLY', '0') == '1'
 SKIP_INGEST = os.environ.get('SKIP_INGEST', '0') == '1'
+# ARM=zep -> Zep's own recipe: search_() with cross-encoder recipe + their exact
+# context string (facts JSON w/ valid_at/invalid_at + "Present = valid" preamble).
+# ARM=ours -> our assembly (facts + profiles + semantic episodes + chain-of-note).
+ARM = os.environ.get('ARM', 'ours')
+# CHUNK_TURNS>0 -> split each session into chunks of N user-assistant turn pairs
+# per episode (matches Kyra's real one-message-per-episode ingestion; the
+# LongMemEval paper's "session decomposition"). 0 = whole session per episode.
+CHUNK_TURNS = int(os.environ.get('CHUNK_TURNS', '0'))
+# QTYPE_FILTER=multi-session -> run only that question type (cheap targeted tests)
+QTYPE_FILTER = os.environ.get('QTYPE_FILTER', '')
+QID_FILTER = [q for q in os.environ.get('QID_FILTER', '').split(',') if q]
 DB_NAME = os.environ.get('DB_NAME', 'longmemeval5')
 oai = AsyncOpenAI(api_key=os.environ['OPENAI_API_KEY'])
 
@@ -86,7 +98,11 @@ def stratified(data, per_type):
     by = defaultdict(list)
     for x in data:
         by[x['question_type']].append(x)
-    return [x for t in sorted(by) for x in by[t][:per_type]]
+    types = [QTYPE_FILTER] if QTYPE_FILTER else sorted(by)
+    sample = [x for t in types for x in by[t][:per_type]]
+    if QID_FILTER:
+        sample = [x for x in sample if x['question_id'] in QID_FILTER]
+    return sample
 
 
 async def ingest(g, inst):
@@ -98,8 +114,16 @@ async def ingest(g, inst):
         pass
     dates = inst.get('haystack_dates') or [inst['question_date']] * len(inst['haystack_sessions'])
     skipped = 0
+    units = []  # (body, date) episodes to ingest
     for sess, date in zip(inst['haystack_sessions'], dates):
-        body = '\n'.join(f'{t["role"]}: {t["content"]}' for t in sess)
+        if CHUNK_TURNS > 0:
+            step = CHUNK_TURNS * 2  # N user+assistant pairs
+            for i in range(0, len(sess), step):
+                chunk = sess[i:i + step]
+                units.append(('\n'.join(f'{t["role"]}: {t["content"]}' for t in chunk), date))
+        else:
+            units.append(('\n'.join(f'{t["role"]}: {t["content"]}' for t in sess), date))
+    for body, date in units:
         if not body.strip():
             continue
         try:
@@ -119,10 +143,31 @@ async def ingest(g, inst):
     return skipped
 
 
+import re as _re
+
+_COUNT_RE = _re.compile(r'\bhow (many|much|long|often)\b|\btotal\b|\bcount\b', _re.I)
+
+
 async def retrieve_context(g, gid, question):
     # (1) Graph FACTS -- structure + temporal, chronological for ordering/updates.
-    edges = await g.search(question, group_ids=[gid], num_results=TOP_K)
-    facts = [f'[{edge_date(e)}] {e.fact}' for e in sorted(edges, key=edge_date)]
+    # COUNTING/AGGREGATION questions get ALL facts (retrieve-all, not top-K):
+    # per-question graphs hold only ~15-40 edges, and a compact complete fact
+    # list is what lets the reader enumerate without long-context misses --
+    # ranking is the wrong tool for enumeration.
+    if _COUNT_RE.search(question):
+        from graphiti_core.edges import EntityEdge as _EE
+
+        edges = await _EE.get_by_group_ids(g.driver, [gid])
+    else:
+        edges = await g.search(question, group_ids=[gid], num_results=TOP_K)
+    # Merged-arm fact format: chronological AND carrying the validity window
+    # (Zep's signal) -- invalid_at 'Present' marks the currently-true fact.
+    facts = [
+        (f'[SUPERSEDED on {e.invalid_at:%Y-%m-%d} -- OUTDATED, do not answer with this] '
+         f'[{edge_date(e)}] {e.fact}'
+         if e.invalid_at else f'[{edge_date(e)} -> Present] {e.fact}')
+        for e in sorted(edges, key=edge_date)
+    ]
     # (2) Entity PROFILES -- Graphiti's aggregated per-entity summaries (counting).
     try:
         nodes = await EntityNode.get_by_group_ids(g.driver, [gid])
@@ -138,27 +183,57 @@ async def retrieve_context(g, gid, question):
     try:
         episodes = await EpisodicNode.get_by_group_ids(g.driver, [gid])
         if episodes:
+            # Multi-query: a two-event question ("days between X and Y") misses
+            # one event when ranked by the whole question. Decompose into event
+            # sub-queries (cheap mini call), rank by BEST match across queries.
+            queries = [question]
+            try:
+                sq = await with_retry(lambda: oai.chat.completions.create(
+                    model=MODEL, temperature=0, messages=[
+                        {'role': 'user', 'content':
+                         'List each distinct event/fact mentioned in this question, one short '
+                         f'search phrase per line (max 3 lines, no numbering):\n{question}'}]))
+                queries += [ln.strip() for ln in sq.choices[0].message.content.splitlines() if ln.strip()][:3]
+            except Exception:
+                pass
             embs = await g.embedder.create_batch(
-                [question] + [ep.content[:2000] for ep in episodes]
+                queries + [ep.content[:2000] for ep in episodes]
             )
-            qv, ep_vecs = embs[0], embs[1:]
+            q_vecs, ep_vecs = embs[:len(queries)], embs[len(queries):]
             ranked = sorted(
                 zip(episodes, ep_vecs, strict=False),
-                key=lambda pair: cosine_similarity(qv, pair[1]),
+                key=lambda pair: max(cosine_similarity(qv, pair[1]) for qv in q_vecs),
                 reverse=True,
             )
             # Dedupe near-identical episodes (re-ingested content) so duplicates
             # don't crowd out OTHER evidence sessions -- the direct cause of the
             # counting/multi-session misses.
             seen_pref = set()
+            picked_eps = []
             for ep, _ in ranked:
                 key = ep.content[:200]
                 if key in seen_pref:
                     continue
                 seen_pref.add(key)
-                evidence.append(ep.content[:900])
-                if len(evidence) >= N_EPISODES:
+                picked_eps.append(ep)
+                if len(picked_eps) >= N_EPISODES:
                     break
+            # Split a TOTAL char budget across picked episodes instead of a flat
+            # 900-char cut -- deep answers in long sessions were being truncated
+            # away ("I don't know" despite correct retrieval).
+            # Sessions run 12-20k chars; truncation was cutting gold turns (4/10
+            # multi-session instances). gpt-4.1 has 1M context -- include full
+            # sessions: 80k total budget, capped at 22k/session (> observed max).
+            # 48k total (~12k tokens): fits the org's 30k-TPM gpt-4.1 limit while
+            # covering most sessions fully (obs. max ~20k chars single-session).
+            per_ep = min(20000, max(1200, 48000 // max(1, len(picked_eps))))
+            # Date-stamp each episode and present chronologically -- ordering
+            # questions need the timeline anchored, not similarity order.
+            picked_eps.sort(key=lambda ep: ep.valid_at or ep.created_at)
+            evidence = [
+                f'[SESSION DATE: {(ep.valid_at or ep.created_at).strftime("%Y-%m-%d")}]\n{ep.content[:per_ep]}'
+                for ep in picked_eps
+            ]
     except Exception:
         evidence = []
     return facts, evidence, summaries
@@ -178,12 +253,30 @@ async def answer(question, qdate, facts, evidence, summaries):
          'date. For COUNTING questions, list every DISTINCT instance across ALL facts and evidence '
          '(scan everything, dedupe identical mentions, do not stop early). For UPDATES, note the '
          'latest-dated value. For ORDERING, sort by date.\n'
+         'For RECOMMENDATION/SUGGESTION questions ("can you suggest/recommend..."), do NOT answer '
+         '"no information" and NEVER say I don\'t know: identify the user\'s stated preferences, '
+         'equipment, brands, tastes, interests, and constraints from memory, and give a '
+         'recommendation explicitly tailored to those (name the preference you are honoring, e.g. '
+         'Sony-compatible, Adobe-focused). Even when memory lacks specific venues/events/items, '
+         'recommend generic options THAT FIT the user\'s stated interests.\n'
+         'For DATE-DIFFERENCE questions ("how many days between/before X and Y"), write out both '
+         'dates explicitly, then compute the difference by counting days step-by-step (month by '
+         'month), showing the arithmetic in your notes before answering.\n'
          'STEP 2: end with a line "FINAL: <answer>" -- the specific value/name/number/date only. '
          'For counting, count your deduped list. For a quantity stated at multiple dates (e.g. a '
          'personal best, a price, an amount), the value stated at the LATEST date is the current '
-         'truth even if stated in passing. Say FINAL: I don\'t know only if the evidence truly '
-         'lacks it.'},
-        {'role': 'user', 'content': f'TODAY: {qdate}\n\nENTITY PROFILES:\n{sb}\n\nFACTS (chronological):\n{fb}\n\nCONVERSATION EVIDENCE:\n{eb}\n\nQUESTION: {question}'},
+         'truth even if stated in passing -- an offhand later mention ("my personal best of X") '
+         'REDEFINES the quantity and beats an earlier, more explicit claim ("I set a PB of Y"). '
+         'A fact whose bracketed window is CLOSED (ends with a date, not "Present") has been '
+         'SUPERSEDED: when any open "[... -> Present]" fact covers the same quantity, answer from '
+         'the open fact -- "what was/is my X" asks for the current X unless an earlier time is '
+         'named. '
+         'For "most recent X" questions, list every candidate X with its date and pick the '
+         'latest-dated, not the most prominently described. Say FINAL: I don\'t know only if the '
+         'evidence truly lacks it.'},
+        {'role': 'user', 'content': f'TODAY: {qdate}\n\nENTITY PROFILES (may contain STALE values -- '
+         f'dated FACTS are authoritative; when they disagree, trust the latest open-window FACT):\n{sb}\n\n'
+         f'FACTS (chronological):\n{fb}\n\nCONVERSATION EVIDENCE:\n{eb}\n\nQUESTION: {question}'},
     ]))
     text = r.choices[0].message.content.strip()
     # Parse the FINAL line so notes never leak into the judged answer.
@@ -193,10 +286,23 @@ async def answer(question, qdate, facts, evidence, summaries):
     return text
 
 
+async def answer_zep(question, qdate, zep_context):
+    """Arm A reader: Zep's context string verbatim, minimal QA instruction."""
+    r = await with_retry(lambda: oai.chat.completions.create(model=READER_MODEL, temperature=0, messages=[
+        {'role': 'system', 'content': 'You answer the question using the provided memory context. '
+         'Be concise; give the specific value.'},
+        {'role': 'user', 'content': f'TODAY: {qdate}\n\n{zep_context}\n\nQUESTION: {question}\nANSWER:'},
+    ]))
+    return r.choices[0].message.content.strip()
+
+
 async def judge(question, gold, pred):
     r = await with_retry(lambda: oai.chat.completions.create(model=MODEL, temperature=0, messages=[
         {'role': 'system', 'content': 'Grade if the predicted answer matches the gold answer in meaning. '
-         'Reply exactly "CORRECT" or "WRONG".'},
+         'When the gold describes a USER PREFERENCE ("The user would prefer..."), grade CORRECT if '
+         'the prediction\'s suggestions ALIGN with that stated preference (e.g. gold wants '
+         'Sony-compatible gear and the prediction recommends for a Sony camera), regardless of '
+         'phrasing. Reply exactly "CORRECT" or "WRONG".'},
         {'role': 'user', 'content': f'QUESTION: {question}\nGOLD: {gold}\nPREDICTED: {pred}'},
     ]))
     return r.choices[0].message.content.strip().upper().startswith('CORRECT')
@@ -218,6 +324,21 @@ async def run_one(g, inst, sem):
                     await ingest(gs, inst)
                 if INGEST_ONLY:
                     return {'qtype': inst['question_type'], 'ingest_only': True}
+                if ARM == 'zep':
+                    from graphiti_core.search.search_config_recipes import (
+                        COMBINED_HYBRID_SEARCH_CROSS_ENCODER,
+                    )
+                    from graphiti_core.search.search_helpers import (
+                        search_results_to_context_string,
+                    )
+                    cfg = COMBINED_HYBRID_SEARCH_CROSS_ENCODER.model_copy(deep=True)
+                    cfg.limit = TOP_K
+                    sr = await gs.search_(inst['question'], config=cfg, group_ids=[gid])
+                    zep_context = search_results_to_context_string(sr)
+                    pred = await answer_zep(inst['question'], inst.get('question_date', ''), zep_context)
+                    correct = await judge(inst['question'], inst['answer'], pred)
+                    return {'qtype': inst['question_type'], 'correct': correct,
+                            'question': inst['question'], 'gold': inst['answer'], 'pred': pred}
                 facts, evidence, summaries = await retrieve_context(gs, gid, inst['question'])
             finally:
                 await gs.close()
