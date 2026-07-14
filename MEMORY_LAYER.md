@@ -1,4 +1,4 @@
-# Kyra Memory Layer — Master Handoff Doc
+# Memory Layer — Master Handoff Doc
 
 > **Read this first.** This file lets a fresh contributor (human or model) pick up the entire
 > project in one pass. Companion: `server/evals/README.md` (benchmark runbook).
@@ -6,12 +6,18 @@
 
 ## 1. Mission
 
-**Kyra** (trykyra.io) is a proactive cross-app communication assistant ("one interface for
-everything that needs your attention" — Slack/Gmail/WhatsApp/Teams/calendar; iOS/macOS app first,
-minimal smart-glasses+ring later). This repo (a fork of getzep/graphiti) hosts its
-**memory-context layer**: ingest conversations/emails/messages → temporally-aware knowledge graph
-→ serve **reactive** (query→context) and **proactive** (rolling window→briefing-or-SILENCE)
-retrieval. Target: a genuinely SOTA, widely-usable memory layer.
+This repo (a fork of getzep/graphiti) hosts a **general-purpose memory-context layer** for AI
+assistants and agents: ingest conversations/emails/messages/transcripts → temporally-aware
+knowledge graph → serve **reactive** (query→context) and **proactive** (rolling
+window→briefing-or-SILENCE) retrieval, with trust (per-fact confidence, validity windows,
+supersession), legibility (why-chains, citations), and a feedback loop (outcome-labeled decision
+traces). Target: a genuinely SOTA, widely-usable memory layer.
+
+**Flagship use case: Kyra** (trykyra.io) — a proactive cross-app communication assistant ("one
+interface for everything that needs your attention"; iOS/macOS first, minimal glasses+ring
+later). Kyra drives requirements (the COMMITMENT/TASK/MEETING ontology, salience gating,
+message-grain ingestion) but nothing in the layer is Kyra-specific — any agent needing durable,
+trustworthy memory can consume the same endpoints.
 
 A separate repo `/Users/mac/memory-engine` is a research prototype: **port its ideas, never its
 code** (it deliberately keeps heavy research baggage).
@@ -52,7 +58,7 @@ LongMemEval-**S**, not oracle — don't conflate), Mem0 ~66–68% LoCoMo.
 **The fix stack (each traced to root cause; see git log):**
 1. **Chunked/message-grain ingestion** (CHUNK_TURNS=2) — THE structural fix: session-level
    extraction drops enumerable items. multi-session 20→86%, temporal 40→100% non-error.
-   Kyra's server already ingests one message/episode — the product grain is correct.
+   The server already ingests one message/episode — the product grain is correct.
 2. **In-passing extraction rule** (core prompt) — subordinate-clause facts.
 3. **SUPERSEDED tags** on closed-window facts — **marking beats instructing** (three instruction
    variants failed; the explicit tag fixed knowledge-update stale-value picks). Graphiti's

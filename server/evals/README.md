@@ -1,6 +1,6 @@
 # Memory-Layer Benchmark Runbook
 
-Harnesses validating the Kyra memory layer. Read `/KYRA_MEMORY_LAYER.md` first.
+Harnesses validating the memory layer. Read `/MEMORY_LAYER.md` first.
 
 ## Results so far (2026-07-14)
 

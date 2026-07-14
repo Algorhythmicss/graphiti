@@ -2,9 +2,9 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## ⚡ Kyra Memory Layer — START HERE
+## ⚡ Memory Layer — START HERE
 
-This fork hosts the **Kyra memory-context layer** (proactive assistant memory built on Graphiti). Before any work on it, read **`KYRA_MEMORY_LAYER.md`** (repo root) — mission, architecture map, benchmark journey (90% LongMemEval-oracle n=60 / 78% LoCoMo n=50), the fix stack, infra gotchas (FalkorDB multi-graph scoping, Mac-sleep stalls, 30k TPM), open ends, and pre-registered predictions for the full-size runs. Benchmark runbook: `server/evals/README.md`. Push only to the `fork` remote (Algorhythmicss/graphiti), NEVER `origin` (getzep).
+This fork hosts a **general-purpose memory-context layer** for AI assistants (proactive + reactive, built on Graphiti; flagship use case: Kyra). Before any work on it, read **`MEMORY_LAYER.md`** (repo root) — mission, architecture map, benchmark journey (90% LongMemEval-oracle n=60 / 78% LoCoMo n=50), the fix stack, infra gotchas (FalkorDB multi-graph scoping, Mac-sleep stalls, 30k TPM), open ends, and pre-registered predictions for the full-size runs. Benchmark runbook: `server/evals/README.md`. Push only to the `fork` remote (Algorhythmicss/graphiti), NEVER `origin` (getzep).
 
 ## Project Overview
 
