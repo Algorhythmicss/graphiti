@@ -6,7 +6,10 @@ temporally (latest-for-updates, count-for-counts) and judge vs gold. v1 undersol
 badly by handing the reader bare undated facts; the graph already carries the
 temporal metadata SOTA needs.
 
-Writes a full report to longmemeval_results.out.
+Writes a full report to longmemeval_results.out, plus longmemeval_results.jsonl
+(one line per question, appended as each completes). Restarting resumes:
+completed non-error results are loaded from the jsonl and skipped; errored
+ones re-run. Delete the jsonl to start a fresh scoring run.
 Usage: PER_TYPE=3 CONCURRENCY=3 TOP_K=25 python longmemeval_harness.py
 """
 
@@ -46,6 +49,7 @@ from graph_service.ontology import KYRA_EDGE_TYPE_MAP, KYRA_EDGE_TYPES, KYRA_ENT
 
 DATA = Path(__file__).parent / 'longmemeval_oracle.json'
 OUT = open(Path(__file__).parent / 'longmemeval_results.out', 'w')
+RESULTS_JSONL = Path(__file__).parent / 'longmemeval_results.jsonl'
 PER_TYPE = int(os.environ.get('PER_TYPE', '4'))
 CONCURRENCY = int(os.environ.get('CONCURRENCY', '1'))
 TOP_K = int(os.environ.get('TOP_K', '30'))
@@ -80,6 +84,31 @@ oai = AsyncOpenAI(api_key=os.environ['OPENAI_API_KEY'])
 
 def log(*a):
     print(*a, file=OUT, flush=True)
+
+
+def load_done():
+    # Resume map from prior runs: question_id -> result. Errored results are NOT
+    # treated as done (errors score as wrong -- always re-attempt them).
+    done = {}
+    if RESULTS_JSONL.exists():
+        for line in RESULTS_JSONL.open():
+            try:
+                r = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            # Only resume results from the same arm -- mixing ours/zep answers
+            # in one scored run would silently corrupt the comparison.
+            if not r.get('error') and r.get('question_id') and r.get('arm', 'ours') == ARM:
+                done[r['question_id']] = r
+    return done
+
+
+_JSONL_OUT = RESULTS_JSONL.open('a')
+
+
+def record(result):
+    _JSONL_OUT.write(json.dumps(result, ensure_ascii=False) + '\n')
+    _JSONL_OUT.flush()
 
 
 def parse_date(s):
@@ -309,6 +338,15 @@ async def judge(question, gold, pred):
 
 
 async def run_one(g, inst, sem):
+    res = await _run_one_inner(g, inst, sem)
+    res['question_id'] = inst['question_id']
+    res['arm'] = ARM
+    if not res.get('ingest_only'):
+        record(res)  # durable per-answer write -- a crash never loses paid QA
+    return res
+
+
+async def _run_one_inner(g, inst, sem):
     async with sem:
         try:
             gid = inst['question_id']
@@ -353,11 +391,19 @@ async def run_one(g, inst, sem):
 async def main():
     data = json.load(open(DATA))
     sample = stratified(data, PER_TYPE)
-    log(f'sample={len(sample)} ({PER_TYPE}/type) TOP_K={TOP_K} N_EPISODES={N_EPISODES} model={MODEL}\n')
-    g = Graphiti(graph_driver=FalkorDriver(host='localhost', port=6379, database='longmemeval5'))
+    # QID_FILTER is the fix->retest loop: always re-run those qids (the fresh
+    # answer's jsonl line supersedes the old one -- load_done keeps last-wins).
+    done = {} if (INGEST_ONLY or QID_FILTER) else load_done()
+    resumed = [done[x['question_id']] for x in sample if x['question_id'] in done]
+    pending = [x for x in sample if x['question_id'] not in done]
+    log(f'sample={len(sample)} ({PER_TYPE}/type) TOP_K={TOP_K} N_EPISODES={N_EPISODES} model={MODEL}')
+    if resumed:
+        log(f'resumed {len(resumed)} completed answers from {RESULTS_JSONL.name}')
+    log('')
+    g = Graphiti(graph_driver=FalkorDriver(host='localhost', port=6379, database=DB_NAME))
     await g.build_indices_and_constraints()
     sem = asyncio.Semaphore(CONCURRENCY)
-    results = await asyncio.gather(*[run_one(g, x, sem) for x in sample])
+    results = resumed + list(await asyncio.gather(*[run_one(g, x, sem) for x in pending]))
     await g.close()
 
     by = defaultdict(lambda: [0, 0])
@@ -384,3 +430,4 @@ async def main():
 
 asyncio.run(main())
 OUT.close()
+_JSONL_OUT.close()

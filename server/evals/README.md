@@ -32,8 +32,11 @@ fix — 0 = whole-session, scores much lower) · `SKIP_INGEST=1` QA-only on exis
 `INGEST_ONLY=1` · `QTYPE_FILTER` / `QID_FILTER` for micro-tests (~$0.30) · `ARM=zep` runs
 Graphiti's own recipe (cross-encoder + their context string) as the baseline arm.
 
-Results → `longmemeval_results.out`. Ingest is **idempotent** (skips populated per-qid graphs):
-resume after a stall by re-running; `GRAPH.DELETE` any instance that was mid-ingest.
+Results → `longmemeval_results.out` (report) + `longmemeval_results.jsonl` (one line per
+answer, written as each completes). Both ingest **and QA are resumable**: re-running skips
+populated per-qid graphs and already-answered questions (errored answers re-run; `ARM` is
+tagged per line so ours/zep runs never mix; `QID_FILTER` bypasses resume for fix→retest).
+Delete the jsonl for a fresh scoring run; `GRAPH.DELETE` any instance that was mid-ingest.
 
 ## LoCoMo
 
@@ -42,8 +45,10 @@ OPENAI_API_KEY=... N_CONV=2 QA_PER_CONV=25 CHUNK_TURNS=2 CONCURRENCY=2 \
   uv run python evals/locomo_harness.py
 ```
 
-Full run: `N_CONV=10 QA_PER_CONV=999` (~$60–80, ~15–18h at 30k TPM). **TODO before full run:**
-add incremental result writing (a crash in QA currently loses paid answers).
+Full run: `N_CONV=10 QA_PER_CONV=999` (~$60–80, ~15–18h at 30k TPM). Results →
+`locomo_results.out` + `locomo_results.jsonl` (appended per answer). QA is **resumable**:
+re-running skips already-answered questions (errored ones re-run) and fully-answered
+conversations entirely. Delete the jsonl for a fresh scoring run.
 
 ## recall_diag.py — use this first
 

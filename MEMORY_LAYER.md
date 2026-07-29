@@ -97,8 +97,10 @@ measured honestly.
 
 ## 5. Open ends (ranked next work)
 
-1. **Full-500 LongMemEval + full LoCoMo** — say-go-and-fire; harnesses ready. Add incremental
-   result writing to the LoCoMo harness first (QA restart risk = ~$45).
+1. **Full-500 LongMemEval + full LoCoMo** — say-go-and-fire; harnesses ready. Incremental
+   result writing DONE (2026-07-29): both harnesses append per-answer `.jsonl` and resume on
+   restart (errored answers re-run; arm-tagged; QID_FILTER bypasses resume). Only blocker:
+   credits.
 2. **App integration** — nothing consumes `/get-context`, `/get-ambient-context`,
    `/ambient-outcome` yet. The Phase-6 learning loop needs real outcomes. Includes cross-app
    scope re-filter + behavioral preference inference (needs app signals: reply latency, etc.).

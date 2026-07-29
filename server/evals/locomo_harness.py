@@ -6,7 +6,10 @@ ordered context, retrieve-all for counting, split evidence budget with session
 dates, chain-of-note reader with FINAL parsing, 12-try/75s retry.
 
 Usage: N_CONV=2 QA_PER_CONV=25 CONCURRENCY=2 python locomo_harness.py
-Writes locomo_results.out.
+Writes locomo_results.out (report) + locomo_results.jsonl (one line per QA,
+appended as each completes). Restarting resumes: completed non-error results
+are loaded from the jsonl and skipped; errored ones re-run. Delete the jsonl
+to start a fresh scoring run.
 """
 
 import asyncio
@@ -30,6 +33,7 @@ from graph_service.ambient import cosine_similarity  # noqa: E402
 
 DATA = Path(__file__).parent / 'locomo' / 'data' / 'locomo10.json'
 OUT = open(Path(__file__).parent / 'locomo_results.out', 'w')
+RESULTS_JSONL = Path(__file__).parent / 'locomo_results.jsonl'
 N_CONV = int(os.environ.get('N_CONV', '2'))
 QA_PER_CONV = int(os.environ.get('QA_PER_CONV', '25'))
 CONCURRENCY = int(os.environ.get('CONCURRENCY', '2'))
@@ -46,6 +50,29 @@ RETRYABLE = (openai.RateLimitError, openai.APITimeoutError, openai.APIConnection
 
 def log(*a):
     print(*a, file=OUT, flush=True)
+
+
+def load_done():
+    # Resume map from prior runs: (gid, question) -> result. Errored results are
+    # NOT treated as done (errors score as wrong -- always re-attempt them).
+    done = {}
+    if RESULTS_JSONL.exists():
+        for line in RESULTS_JSONL.open():
+            try:
+                r = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not r.get('error'):
+                done[(r.get('gid'), r.get('q'))] = r
+    return done
+
+
+_JSONL_OUT = RESULTS_JSONL.open('a')
+
+
+def record(result):
+    _JSONL_OUT.write(json.dumps(result, ensure_ascii=False) + '\n')
+    _JSONL_OUT.flush()
 
 
 async def with_retry(fn, tries=12, exc=RETRYABLE):
@@ -203,28 +230,42 @@ async def run_qa(gs, gid, q, sem):
             facts, profiles, ev = await retrieve(gs, gid, q['question'])
             pred = await answer(q['question'], facts, profiles, ev)
             correct = await judge(q['question'], str(q.get('answer')), pred)
-            return {'cat': q.get('category'), 'correct': correct, 'q': q['question'],
-                    'gold': str(q.get('answer'))[:90], 'pred': pred[:100]}
+            res = {'gid': gid, 'cat': q.get('category'), 'correct': correct, 'q': q['question'],
+                   'gold': str(q.get('answer'))[:90], 'pred': pred[:100]}
         except Exception as e:
-            return {'cat': q.get('category'), 'correct': False, 'error': repr(e)[:120], 'q': q['question']}
+            res = {'gid': gid, 'cat': q.get('category'), 'correct': False,
+                   'error': repr(e)[:120], 'q': q['question']}
+        record(res)  # durable per-answer write -- a crash never loses paid QA
+        return res
 
 
 async def main():
     data = json.load(open(DATA))
-    log(f'N_CONV={N_CONV} QA_PER_CONV={QA_PER_CONV} CHUNK_TURNS={CHUNK_TURNS} TOP_K={TOP_K} reader={READER_MODEL}\n')
+    done = load_done()
+    log(f'N_CONV={N_CONV} QA_PER_CONV={QA_PER_CONV} CHUNK_TURNS={CHUNK_TURNS} TOP_K={TOP_K} reader={READER_MODEL}')
+    if done:
+        log(f'resumed {len(done)} completed answers from {RESULTS_JSONL.name}')
+    log('')
     results = []
     for ci, item in enumerate(data[:N_CONV]):
         gid = item.get('sample_id', f'conv{ci}')
+        qs = sample_qa(item['qa'], QA_PER_CONV)
+        resumed = [done[(gid, q['question'])] for q in qs if (gid, q['question']) in done]
+        pending = [q for q in qs if (gid, q['question']) not in done]
+        results.extend(resumed)
+        if not pending:
+            log(f'  {gid}: all {len(resumed)} answers resumed, skipping')
+            continue
         gs = Graphiti(graph_driver=FalkorDriver(host='localhost', port=6379, database=gid))
         try:
             await gs.build_indices_and_constraints()
             log(f'ingesting {gid} (chunked)...')
             await ingest_conversation(gs, item['conversation'], gid)
-            qs = sample_qa(item['qa'], QA_PER_CONV)
             sem = asyncio.Semaphore(CONCURRENCY)
-            res = await asyncio.gather(*[run_qa(gs, gid, q, sem) for q in qs])
+            res = await asyncio.gather(*[run_qa(gs, gid, q, sem) for q in pending])
             results.extend(res)
-            log(f'  {gid}: {sum(bool(r.get("correct")) for r in res)}/{len(res)}')
+            log(f'  {gid}: {sum(bool(r.get("correct")) for r in res)}/{len(res)} new'
+                + (f' (+{len(resumed)} resumed)' if resumed else ''))
         finally:
             await gs.close()
 
@@ -248,3 +289,4 @@ async def main():
 
 asyncio.run(main())
 OUT.close()
+_JSONL_OUT.close()
