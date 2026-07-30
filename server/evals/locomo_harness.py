@@ -122,29 +122,37 @@ def sample_qa(qa, per_conv):
 
 
 async def ingest_conversation(gs, conv, gid):
-    try:
-        if await EntityNode.get_by_group_ids(gs.driver, [gid]):
-            return  # idempotent resume
-    except Exception:
-        pass
     sess_keys = sorted(
         [k for k in conv if k.startswith('session') and not k.endswith('date_time')],
         key=lambda k: int(k.split('_')[1]),
     )
+    units = []
     for k in sess_keys:
         turns, date = conv[k], conv.get(f'{k}_date_time', '')
         step = max(1, CHUNK_TURNS * 2)
         for i in range(0, len(turns), step):
             body = '\n'.join(f'{t["speaker"]}: {t["text"]}' for t in turns[i:i + step])
-            if not body.strip():
-                continue
-            try:
-                await with_retry(lambda b=body, d=date: gs.add_episode(
-                    name=gid, episode_body=b, reference_time=parse_date(d),
-                    source=EpisodeType.message, source_description='locomo', group_id=gid),
-                    tries=4, exc=(Exception,))
-            except Exception:
-                pass
+            if body.strip():
+                units.append((body, date))
+    # Resume at EPISODE granularity, not graph-exists granularity: a run killed
+    # mid-ingest (Mac sleep -> dead sockets) leaves a PARTIAL graph, and a
+    # "graph is non-empty -> skip" check accepts it, so QA silently runs against
+    # half a memory. Ingest only genuinely-missing episodes; a complete
+    # conversation still costs zero LLM calls.
+    try:
+        existing = {e.content for e in await EpisodicNode.get_by_group_ids(gs.driver, [gid])}
+    except Exception:
+        existing = set()
+    for body, date in units:
+        if body in existing:
+            continue
+        try:
+            await with_retry(lambda b=body, d=date: gs.add_episode(
+                name=gid, episode_body=b, reference_time=parse_date(d),
+                source=EpisodeType.message, source_description='locomo', group_id=gid),
+                tries=4, exc=(Exception,))
+        except Exception:
+            pass
 
 
 _EP_CACHE: dict = {}

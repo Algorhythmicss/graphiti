@@ -134,17 +134,11 @@ def stratified(data, per_type):
     return sample
 
 
-async def ingest(g, inst):
-    gid = inst['question_id']
-    try:
-        if await EntityNode.get_by_group_ids(g.driver, [gid]):
-            return 0  # already ingested -- idempotent resume across runs
-    except Exception:
-        pass
+def episode_units(inst):
+    """The (body, date) episodes this instance should contain -- the ingest plan."""
     dates = inst.get('haystack_dates') or [inst['question_date']] * len(inst['haystack_sessions'])
-    skipped = 0
-    units = []  # (body, date) episodes to ingest
-    for sess, date in zip(inst['haystack_sessions'], dates):
+    units = []
+    for sess, date in zip(inst['haystack_sessions'], dates, strict=False):
         if CHUNK_TURNS > 0:
             step = CHUNK_TURNS * 2  # N user+assistant pairs
             for i in range(0, len(sess), step):
@@ -152,9 +146,27 @@ async def ingest(g, inst):
                 units.append(('\n'.join(f'{t["role"]}: {t["content"]}' for t in chunk), date))
         else:
             units.append(('\n'.join(f'{t["role"]}: {t["content"]}' for t in sess), date))
-    for body, date in units:
-        if not body.strip():
-            continue
+    return [(b, d) for b, d in units if b.strip()]
+
+
+async def ingest(g, inst):
+    gid = inst['question_id']
+    units = episode_units(inst)
+    # Resume at EPISODE granularity, not graph-exists granularity. A run killed
+    # mid-ingest (Mac sleep -> dead sockets) leaves a PARTIAL graph; the old
+    # check ("any EntityNode exists -> skip") accepted those, so QA silently ran
+    # against half a memory and scored low with no error. Compare stored episode
+    # contents against the plan and ingest only what is genuinely missing --
+    # complete graphs still cost zero LLM calls.
+    try:
+        existing = {e.content for e in await EpisodicNode.get_by_group_ids(g.driver, [gid])}
+    except Exception:
+        existing = set()
+    todo = [(b, d) for b, d in units if b not in existing]
+    if not todo:
+        return 0
+    skipped = 0
+    for body, date in todo:
         try:
             # Broad retry: also recover from a transient malformed-extraction-JSON
             # error (graphiti's LLM occasionally returns truncated JSON). Skip the
