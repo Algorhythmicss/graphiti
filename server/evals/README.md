@@ -17,7 +17,18 @@ Harnesses validating the memory layer. Read `/MEMORY_LAYER.md` first.
   (HuggingFace xiaowu0162/longmemeval-cleaned) and `locomo/data/locomo10.json`
   (github snap-research/locomo) placed next to the harness.
 - Run from `server/`: `uv run python evals/longmemeval_harness.py` (env-config below).
-- **Keep the Mac awake** (`caffeinate -i` + lid open) or the run stalls on dead sockets.
+- **Keep the Mac awake** — AC power + lid open. `caffeinate -i` does NOT stop clamshell or
+  battery maintenance sleep; sleep leaves the process alive on dead sockets, so a stall looks
+  exactly like a slow run. For long runs use the supervisor, which restarts on stall:
+
+  ```bash
+  PER_TYPE=200 CHUNK_TURNS=2 CONCURRENCY=2 USE_ONTOLOGY=0 TOP_K=40 \
+    ./evals/run_supervised.sh longmemeval 500
+  ```
+
+  Args are `<longmemeval|locomo> <target answer count>`; `STALL_SECS` (default 900) is how
+  long without a new answer counts as stalled. Restarting is always safe — resume works both
+  per-answer and per-episode (see below).
 
 ## LongMemEval
 
@@ -34,9 +45,10 @@ Graphiti's own recipe (cross-encoder + their context string) as the baseline arm
 
 Results → `longmemeval_results.out` (report) + `longmemeval_results.jsonl` (one line per
 answer, written as each completes). Both ingest **and QA are resumable**: re-running skips
-populated per-qid graphs and already-answered questions (errored answers re-run; `ARM` is
-tagged per line so ours/zep runs never mix; `QID_FILTER` bypasses resume for fix→retest).
-Delete the jsonl for a fresh scoring run; `GRAPH.DELETE` any instance that was mid-ingest.
+already-answered questions (errored answers re-run; `ARM` is tagged per line so ours/zep runs
+never mix; `QID_FILTER` bypasses resume for fix→retest) and ingests only **genuinely missing
+episodes** — a graph left partial by a killed run is topped up, not mistaken for complete.
+No manual `GRAPH.DELETE` needed. Delete the jsonl for a fresh scoring run.
 
 ## LoCoMo
 
