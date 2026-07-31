@@ -12,14 +12,38 @@
 #   PER_TYPE=200 CHUNK_TURNS=2 ... ./evals/run_supervised.sh longmemeval 500
 #   N_CONV=10 QA_PER_CONV=999 ... ./evals/run_supervised.sh locomo 1986
 set -u
+set -m   # job control: each background job leads its OWN process group, so the
+         # stall kill below can take down the whole `caffeinate -> uv -> python`
+         # tree. Killing just the launched pid orphans the real python worker
+         # (it reparents to init and keeps running) -- that once left TWO
+         # harnesses racing on the same graphs, double-spending and writing
+         # duplicate episodes.
 HARNESS="${1:?usage: run_supervised.sh <longmemeval|locomo> <target_answers>}"
 TARGET="${2:?missing target answer count}"
-STALL_SECS="${STALL_SECS:-900}"    # no new answer for this long => restart
+# No new answer for this long => assume hung and restart. Must exceed the
+# harness's own worst case: with_retry backs off up to 75s x 12 tries (~8-10min
+# of legitimate silence) during a TPM-throttled stretch, and a big instance's
+# ingest adds to that. 900s produced false restarts; 30min is the safe floor.
+STALL_SECS="${STALL_SECS:-1800}"
 POLL_SECS="${POLL_SECS:-60}"
 EVALS="$(cd "$(dirname "$0")" && pwd)"
 JSONL="$EVALS/${HARNESS}_results.jsonl"
 LOG="$EVALS/${HARNESS}_supervised.log"
 say() { echo "[$(date '+%F %T')] $*" | tee -a "$LOG"; }
+
+kill_tree() {  # kill the job's whole process group, then verify nothing survived
+  local pid="$1"
+  kill -9 -"$pid" 2>/dev/null || kill -9 "$pid" 2>/dev/null
+  wait "$pid" 2>/dev/null
+  for _ in 1 2 3 4 5; do
+    pgrep -f "${HARNESS}_harness.py" >/dev/null || return 0
+    sleep 1
+  done
+  # Last resort: a survivor here would race the next launch on the same graphs.
+  say "WARNING: ${HARNESS}_harness.py survived group kill -- pkill'ing stragglers"
+  pkill -9 -f "${HARNESS}_harness.py" 2>/dev/null
+  sleep 2
+}
 
 count_done() {  # unique non-error answers; jsonl is append-only so ids repeat
   python3 - "$JSONL" <<'PY'
@@ -51,8 +75,8 @@ while true; do
     now_n=$(count_done)
     if [ "$now_n" -ne "$last_n" ]; then last_n=$now_n; last_change=$(date +%s); continue; fi
     if [ $(( $(date +%s) - last_change )) -ge "$STALL_SECS" ]; then
-      say "STALLED at $now_n answers for ${STALL_SECS}s (likely slept) -- restarting"
-      kill -9 "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
+      say "STALLED at $now_n answers for ${STALL_SECS}s -- restarting"
+      kill_tree "$pid"
       break
     fi
   done
