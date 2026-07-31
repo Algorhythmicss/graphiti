@@ -48,6 +48,25 @@ oai = AsyncOpenAI(api_key=os.environ['OPENAI_API_KEY'])
 RETRYABLE = (openai.RateLimitError, openai.APITimeoutError, openai.APIConnectionError)
 
 
+def falkor_driver(database):
+    """FalkorDriver whose socket cannot block indefinitely.
+
+    FalkorDriver's own client sets socket_timeout=None, so a dead socket (Mac
+    sleep, FalkorDB hiccup) blocks forever and the awaiting task cannot even be
+    cancelled -- this froze the LongMemEval-500 run roughly once an hour.
+    """
+    from falkordb.asyncio import FalkorDB as _FalkorDB
+
+    return FalkorDriver(
+        falkor_db=_FalkorDB(
+            host='localhost', port=6379,
+            socket_timeout=float(os.environ.get('FALKOR_SOCKET_TIMEOUT', '120')),
+            socket_connect_timeout=15, socket_keepalive=True, health_check_interval=30,
+        ),
+        database=database,
+    )
+
+
 def log(*a):
     print(*a, file=OUT, flush=True)
 
@@ -264,7 +283,7 @@ async def main():
         if not pending:
             log(f'  {gid}: all {len(resumed)} answers resumed, skipping')
             continue
-        gs = Graphiti(graph_driver=FalkorDriver(host='localhost', port=6379, database=gid))
+        gs = Graphiti(graph_driver=falkor_driver(gid))
         try:
             await gs.build_indices_and_constraints()
             log(f'ingesting {gid} (chunked)...')

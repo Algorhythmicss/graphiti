@@ -83,6 +83,33 @@ DB_NAME = os.environ.get('DB_NAME', 'longmemeval5')
 # Must exceed the legitimate worst case -- ~6 min ingest plus a rate-limit
 # backoff of 75s x 12 tries -- so only a true hang trips it.
 QUESTION_TIMEOUT = int(os.environ.get('QUESTION_TIMEOUT', '1500'))
+# ROOT CAUSE of the recurring whole-run freezes: FalkorDriver builds its client
+# as FalkorDB(host, port, ...) with socket_timeout defaulting to None, i.e. a
+# read blocks FOREVER. When a socket dies (Mac sleep, FalkorDB hiccup) the
+# awaiting task can never be cancelled -- asyncio.wait_for issues the cancel and
+# then waits on that same dead socket, so even the per-question timeout hangs.
+# A bounded socket_timeout turns 'hang forever' into a raisable error the retry
+# path can handle. health_check_interval pings idle connections so a stale one
+# is discovered before it is used.
+FALKOR_SOCKET_TIMEOUT = float(os.environ.get('FALKOR_SOCKET_TIMEOUT', '120'))
+
+
+def falkor_driver(database):
+    """FalkorDriver whose underlying socket cannot block indefinitely."""
+    from falkordb.asyncio import FalkorDB as _FalkorDB
+
+    return FalkorDriver(
+        falkor_db=_FalkorDB(
+            host='localhost', port=6379,
+            socket_timeout=FALKOR_SOCKET_TIMEOUT,
+            socket_connect_timeout=15,
+            socket_keepalive=True,
+            health_check_interval=30,
+        ),
+        database=database,
+    )
+
+
 oai = AsyncOpenAI(api_key=os.environ['OPENAI_API_KEY'])
 
 
@@ -402,7 +429,7 @@ async def _run_one_inner(g, inst):
         # across graphs (episodes vs entities) -- partial graphs, empty
         # retrieval. Scoping everything to database=gid removes all routing
         # ambiguity (and matches per-tenant product deployment).
-        gs = Graphiti(graph_driver=FalkorDriver(host='localhost', port=6379, database=gid))
+        gs = Graphiti(graph_driver=falkor_driver(gid))
         try:
             await gs.build_indices_and_constraints()  # explicit: bg task is too slow for ingest->QA
             if not SKIP_INGEST:
@@ -449,7 +476,7 @@ async def main():
     if resumed:
         log(f'resumed {len(resumed)} completed answers from {RESULTS_JSONL.name}')
     log('')
-    g = Graphiti(graph_driver=FalkorDriver(host='localhost', port=6379, database=DB_NAME))
+    g = Graphiti(graph_driver=falkor_driver(DB_NAME))
     await g.build_indices_and_constraints()
     sem = asyncio.Semaphore(CONCURRENCY)
     results = resumed + list(await asyncio.gather(*[run_one(g, x, sem) for x in pending]))
