@@ -83,9 +83,35 @@ measured honestly.
   Use `Graphiti(FalkorDriver(database=group_id))` for BOTH ingest and QA; ALSO
   `build_indices_and_constraints()` explicitly (background index build races QA). Neo4j
   (production) is single-graph — unaffected.
-- **Mac sleep kills runs**: `caffeinate -i` stops idle-sleep only, not lid-close. Sleep = dead
-  sockets = cascades of timeouts, partial ingests. Harness ingest is idempotent → resume by
-  re-running; clear partial graphs first if an instance was mid-ingest.
+- **FalkorDB OOM is the #1 killer of a full-size run** (cost us ~2 days on LME-500, 2026-07-31).
+  One graph per question means 500 graphs in ONE instance; at ~500 graphs it held ~1.5GB and
+  forked a ~314MB RDB snapshot every 300s, and the fork's copy-on-write spike OOM-killed the
+  container (`OOMKilled=true`, exit 137) inside Docker Desktop's ~3.8GB VM. **The failure does
+  not look like OOM** — before the kill, memory pressure presents as whole-run *hangs* (frozen
+  heartbeat, no answers), so you chase phantom deadlocks in your own code. Always check
+  `docker inspect -f '{{.State.OOMKilled}}'` FIRST when a run freezes. Mitigations: disable
+  periodic forks for the run (`redis-cli CONFIG SET save ""` — data is already on disk and
+  ingest is resumable), give the container an explicit memory limit, and delete per-question
+  graphs once their answers are recorded. Graphs DO survive the kill (RDB reload) — restart the
+  container, don't rebuild it (there is no volume mount; `docker rm` would lose everything).
+- **Mac sleep kills runs**: `caffeinate -i` stops idle-sleep only — NOT lid-close (clamshell) and
+  not battery maintenance sleep. Keep it on AC with the lid open. Sleep = dead sockets =
+  cascades of timeouts, partial ingests. Ingest resumes per-episode, so just re-run.
+- **Never let a stall auto-restart on answer count alone.** A healthy run goes quiet for 30+ min
+  (ingest + a 75s×12 retry backoff). Supervising on answers killed healthy runs and *livelocked*:
+  nothing could finish inside the window, so it restarted forever with zero progress. Use the
+  harness heartbeat (`*_heartbeat` mtime, written on every unit of work) and restart only when
+  BOTH it and the answer count are frozen. Kill the process GROUP (`set -m` + `kill -- -$pid`) —
+  killing the `caffeinate → uv → python` wrapper orphans the real worker, and two harnesses then
+  race on the same graphs.
+- **`FalkorDriver` leaves `socket_timeout=None`** → a read blocks FOREVER on a dead socket, and
+  the awaiting task cannot even be cancelled (`asyncio.wait_for` issues the cancel, then waits on
+  that same socket). Build the client explicitly with `socket_timeout`/`socket_connect_timeout`
+  (see `falkor_driver()` in both harnesses). **This affects the production path too**, not just
+  evals — worth fixing in `graphiti_core`.
+- **When a long run freezes, split ingest from QA** (`INGEST_ONLY=1` then `SKIP_INGEST=1`) and run
+  ONE question in isolation (`QID_FILTER`) before believing the questions are at fault — the 49
+  "stuck" temporal questions each answered correctly in ~2 min once run alone.
 - **OpenAI org limits**: gpt-4.1 TPM = 30k → ~2-3 reader calls/min at 10k-token contexts;
   concurrency 1–2 + retry (12 tries, 75s cap — must outlast a full TPM window). Mini is fine at
   concurrency 3.
