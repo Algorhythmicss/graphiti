@@ -103,6 +103,23 @@ def load_done():
     return done
 
 
+HEARTBEAT = Path(__file__).parent / 'longmemeval_heartbeat'
+
+
+def beat(msg):
+    """Liveness signal for run_supervised.sh.
+
+    Answer count is a BAD stall signal: answers arrive in bursts, and a healthy
+    run can go quiet for 30+ min during ingest or a rate-limit backoff (75s x 12
+    tries). Supervising on answers alone kills healthy runs. This file's mtime
+    advances on every unit of real work, so 'hung' is distinguishable from 'slow'.
+    """
+    try:
+        HEARTBEAT.write_text(f'{datetime.now(timezone.utc):%F %T} {msg}\n')
+    except Exception:
+        pass
+
+
 _JSONL_OUT = RESULTS_JSONL.open('a')
 
 
@@ -181,6 +198,7 @@ async def ingest(g, inst):
                 tries=4, exc=(Exception,))
         except Exception:
             skipped += 1
+        beat(f'ingest {gid}')
     return skipped
 
 
@@ -390,9 +408,11 @@ async def _run_one_inner(g, inst, sem):
                     return {'qtype': inst['question_type'], 'correct': correct,
                             'question': inst['question'], 'gold': inst['answer'], 'pred': pred}
                 facts, evidence, summaries = await retrieve_context(gs, gid, inst['question'])
+                beat(f'retrieved {gid}')
             finally:
                 await gs.close()
             pred = await answer(inst['question'], inst.get('question_date', ''), facts, evidence, summaries)
+            beat(f'answered {gid}')
             correct = await judge(inst['question'], inst['answer'], pred)
             return {'qtype': inst['question_type'], 'correct': correct, 'n_facts': len(facts),
                     'question': inst['question'], 'gold': inst['answer'], 'pred': pred}

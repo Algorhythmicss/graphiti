@@ -28,6 +28,7 @@ STALL_SECS="${STALL_SECS:-1800}"
 POLL_SECS="${POLL_SECS:-60}"
 EVALS="$(cd "$(dirname "$0")" && pwd)"
 JSONL="$EVALS/${HARNESS}_results.jsonl"
+HEARTBEAT="$EVALS/${HARNESS}_heartbeat"
 LOG="$EVALS/${HARNESS}_supervised.log"
 say() { echo "[$(date '+%F %T')] $*" | tee -a "$LOG"; }
 
@@ -74,6 +75,14 @@ while true; do
     sleep "$POLL_SECS"
     now_n=$(count_done)
     if [ "$now_n" -ne "$last_n" ]; then last_n=$now_n; last_change=$(date +%s); continue; fi
+    # Heartbeat = the harness did ANY unit of work (an episode ingested, a
+    # retrieval, an answer). Answers alone are too coarse: they arrive in bursts
+    # and a healthy run goes quiet for 30+ min during ingest or rate-limit
+    # backoff. Only when BOTH are frozen is the process actually hung.
+    if [ -f "$HEARTBEAT" ]; then
+      hb=$(stat -f %m "$HEARTBEAT" 2>/dev/null || stat -c %Y "$HEARTBEAT" 2>/dev/null || echo 0)
+      [ "$hb" -gt "$last_change" ] && last_change=$hb && continue
+    fi
     if [ $(( $(date +%s) - last_change )) -ge "$STALL_SECS" ]; then
       say "STALLED at $now_n answers for ${STALL_SECS}s -- restarting"
       kill_tree "$pid"
