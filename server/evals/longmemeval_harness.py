@@ -482,6 +482,12 @@ async def main():
     results = resumed + list(await asyncio.gather(*[run_one(g, x, sem) for x in pending]))
     await g.close()
 
+    if INGEST_ONLY:
+        # Ingest-only results carry no question/answer -- scoring them crashed
+        # the summary AFTER all the ingest work was already done.
+        log(f'INGEST_ONLY: {len(results)} instances ingested')
+        return
+
     by = defaultdict(lambda: [0, 0])
     errs = 0
     for r in results:
