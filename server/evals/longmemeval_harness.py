@@ -79,6 +79,10 @@ CHUNK_TURNS = int(os.environ.get('CHUNK_TURNS', '0'))
 QTYPE_FILTER = os.environ.get('QTYPE_FILTER', '')
 QID_FILTER = [q for q in os.environ.get('QID_FILTER', '').split(',') if q]
 DB_NAME = os.environ.get('DB_NAME', 'longmemeval5')
+# Ceiling for one question end-to-end (ingest + retrieve + answer + judge).
+# Must exceed the legitimate worst case -- ~6 min ingest plus a rate-limit
+# backoff of 75s x 12 tries -- so only a true hang trips it.
+QUESTION_TIMEOUT = int(os.environ.get('QUESTION_TIMEOUT', '1500'))
 oai = AsyncOpenAI(api_key=os.environ['OPENAI_API_KEY'])
 
 
@@ -368,7 +372,21 @@ async def judge(question, gold, pred):
 
 
 async def run_one(g, inst, sem):
-    res = await _run_one_inner(g, inst, sem)
+    # Hard per-question deadline. Observed in the 500-run: roughly once an hour
+    # BOTH workers freeze permanently (heartbeat and answers stop together) --
+    # a socket that never times out somewhere under the FalkorDB/HTTP clients.
+    # Without this, one stuck question hangs the entire run until the supervisor
+    # kills it, losing every in-flight question with it. A timed-out question is
+    # recorded as an error, so the run continues and resume re-runs it later.
+    # The semaphore is acquired OUT here, not inside the timeout: every question
+    # is scheduled at once and most sit queued for hours, so timing from before
+    # the acquire would fail them all for waiting their turn.
+    try:
+        async with sem:
+            res = await asyncio.wait_for(_run_one_inner(g, inst), timeout=QUESTION_TIMEOUT)
+    except (TimeoutError, asyncio.TimeoutError):
+        res = {'qtype': inst['question_type'], 'correct': False,
+               'error': f'question timeout after {QUESTION_TIMEOUT}s', 'question': inst['question']}
     res['question_id'] = inst['question_id']
     res['arm'] = ARM
     if not res.get('ingest_only'):
@@ -376,48 +394,47 @@ async def run_one(g, inst, sem):
     return res
 
 
-async def _run_one_inner(g, inst, sem):
-    async with sem:
+async def _run_one_inner(g, inst):
+    try:
+        gid = inst['question_id']
+        # ONE SCOPED CLIENT for BOTH ingest and QA. FalkorDB stores each
+        # group_id as its own graph, and a main-client ingest splits writes
+        # across graphs (episodes vs entities) -- partial graphs, empty
+        # retrieval. Scoping everything to database=gid removes all routing
+        # ambiguity (and matches per-tenant product deployment).
+        gs = Graphiti(graph_driver=FalkorDriver(host='localhost', port=6379, database=gid))
         try:
-            gid = inst['question_id']
-            # ONE SCOPED CLIENT for BOTH ingest and QA. FalkorDB stores each
-            # group_id as its own graph, and a main-client ingest splits writes
-            # across graphs (episodes vs entities) -- partial graphs, empty
-            # retrieval. Scoping everything to database=gid removes all routing
-            # ambiguity (and matches per-tenant product deployment).
-            gs = Graphiti(graph_driver=FalkorDriver(host='localhost', port=6379, database=gid))
-            try:
-                await gs.build_indices_and_constraints()  # explicit: bg task is too slow for ingest->QA
-                if not SKIP_INGEST:
-                    await ingest(gs, inst)
-                if INGEST_ONLY:
-                    return {'qtype': inst['question_type'], 'ingest_only': True}
-                if ARM == 'zep':
-                    from graphiti_core.search.search_config_recipes import (
-                        COMBINED_HYBRID_SEARCH_CROSS_ENCODER,
-                    )
-                    from graphiti_core.search.search_helpers import (
-                        search_results_to_context_string,
-                    )
-                    cfg = COMBINED_HYBRID_SEARCH_CROSS_ENCODER.model_copy(deep=True)
-                    cfg.limit = TOP_K
-                    sr = await gs.search_(inst['question'], config=cfg, group_ids=[gid])
-                    zep_context = search_results_to_context_string(sr)
-                    pred = await answer_zep(inst['question'], inst.get('question_date', ''), zep_context)
-                    correct = await judge(inst['question'], inst['answer'], pred)
-                    return {'qtype': inst['question_type'], 'correct': correct,
-                            'question': inst['question'], 'gold': inst['answer'], 'pred': pred}
-                facts, evidence, summaries = await retrieve_context(gs, gid, inst['question'])
-                beat(f'retrieved {gid}')
-            finally:
-                await gs.close()
-            pred = await answer(inst['question'], inst.get('question_date', ''), facts, evidence, summaries)
-            beat(f'answered {gid}')
-            correct = await judge(inst['question'], inst['answer'], pred)
-            return {'qtype': inst['question_type'], 'correct': correct, 'n_facts': len(facts),
-                    'question': inst['question'], 'gold': inst['answer'], 'pred': pred}
-        except Exception as e:
-            return {'qtype': inst['question_type'], 'correct': False, 'error': repr(e)[:200], 'question': inst['question']}
+            await gs.build_indices_and_constraints()  # explicit: bg task is too slow for ingest->QA
+            if not SKIP_INGEST:
+                await ingest(gs, inst)
+            if INGEST_ONLY:
+                return {'qtype': inst['question_type'], 'ingest_only': True}
+            if ARM == 'zep':
+                from graphiti_core.search.search_config_recipes import (
+                    COMBINED_HYBRID_SEARCH_CROSS_ENCODER,
+                )
+                from graphiti_core.search.search_helpers import (
+                    search_results_to_context_string,
+                )
+                cfg = COMBINED_HYBRID_SEARCH_CROSS_ENCODER.model_copy(deep=True)
+                cfg.limit = TOP_K
+                sr = await gs.search_(inst['question'], config=cfg, group_ids=[gid])
+                zep_context = search_results_to_context_string(sr)
+                pred = await answer_zep(inst['question'], inst.get('question_date', ''), zep_context)
+                correct = await judge(inst['question'], inst['answer'], pred)
+                return {'qtype': inst['question_type'], 'correct': correct,
+                        'question': inst['question'], 'gold': inst['answer'], 'pred': pred}
+            facts, evidence, summaries = await retrieve_context(gs, gid, inst['question'])
+            beat(f'retrieved {gid}')
+        finally:
+            await gs.close()
+        pred = await answer(inst['question'], inst.get('question_date', ''), facts, evidence, summaries)
+        beat(f'answered {gid}')
+        correct = await judge(inst['question'], inst['answer'], pred)
+        return {'qtype': inst['question_type'], 'correct': correct, 'n_facts': len(facts),
+                'question': inst['question'], 'gold': inst['answer'], 'pred': pred}
+    except Exception as e:
+        return {'qtype': inst['question_type'], 'correct': False, 'error': repr(e)[:200], 'question': inst['question']}
 
 
 async def main():
