@@ -413,7 +413,11 @@ async def run_one(g, inst, sem):
             res = await asyncio.wait_for(_run_one_inner(g, inst), timeout=QUESTION_TIMEOUT)
     except (TimeoutError, asyncio.TimeoutError):
         res = {'qtype': inst['question_type'], 'correct': False,
-               'error': f'question timeout after {QUESTION_TIMEOUT}s', 'question': inst['question']}
+               'error': f'question timeout after {QUESTION_TIMEOUT}s', 'question': inst['question'],
+               # Carry the flag so an INGEST_ONLY pass never writes a result
+               # line. Without it a timed-out ingest appended an 'error' row for
+               # a question that was already answered in an earlier QA run.
+               'ingest_only': INGEST_ONLY}
     res['question_id'] = inst['question_id']
     res['arm'] = ARM
     if not res.get('ingest_only'):
