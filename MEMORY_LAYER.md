@@ -89,14 +89,14 @@ measured honestly.
   container (`OOMKilled=true`, exit 137) inside Docker Desktop's ~3.8GB VM. **The failure does
   not look like OOM** — before the kill, memory pressure presents as whole-run *hangs* (frozen
   heartbeat, no answers), so you chase phantom deadlocks in your own code. Always check
-  `docker inspect -f '{{.State.OOMKilled}}'` FIRST when a run freezes. Mitigations: disable
-  **prune per-question graphs once their answers are recorded** — this is the
-  REAL fix and should be step one: deleting 452 answered graphs took Redis 1.51G → 71M and the
-  container 2G → 661M. Do NOT reach for `CONFIG SET save ""` as the fix: it removes the fork
-  spike but also stops persistence, so the next crash loses every episode since the last save
-  (cost us ~2h of ingest). Prune first, keep saves ON. Also give the container an explicit
-  memory limit. Graphs DO survive the kill (RDB reload) — restart the
-  container, don't rebuild it (there is no volume mount; `docker rm` would lose everything).
+  `docker inspect -f '{{.State.OOMKilled}}'` FIRST when a run freezes.
+  **Fix: prune per-question graphs once their answers are recorded** — this is step one and by
+  far the biggest lever: deleting 452 answered graphs took Redis 1.51G → 71M and the container
+  2G → 661M. Do NOT reach for `CONFIG SET save ""`: it removes the fork spike but also stops
+  persistence, so the next kill loses every episode since the last save (cost us ~2h of ingest).
+  Prune first, keep saves ON, and give the container an explicit memory limit. Graphs DO survive
+  the kill via RDB reload — restart the container, never rebuild it (there is no volume mount, so
+  `docker rm` loses everything).
 - **Mac sleep kills runs**: `caffeinate -i` stops idle-sleep only — NOT lid-close (clamshell) and
   not battery maintenance sleep. Keep it on AC with the lid open. Sleep = dead sockets =
   cascades of timeouts, partial ingests. Ingest resumes per-episode, so just re-run.
