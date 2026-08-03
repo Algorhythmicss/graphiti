@@ -49,21 +49,19 @@ RETRYABLE = (openai.RateLimitError, openai.APITimeoutError, openai.APIConnection
 
 
 def falkor_driver(database):
-    """FalkorDriver whose socket cannot block indefinitely.
+    """Bounded socket, tightened for evals.
 
-    FalkorDriver's own client sets socket_timeout=None, so a dead socket (Mac
-    sleep, FalkorDB hiccup) blocks forever and the awaiting task cannot even be
-    cancelled -- this froze the LongMemEval-500 run roughly once an hour.
+    FalkorDriver now bounds its socket by default (an unbounded one froze the
+    LongMemEval-500 run roughly once an hour: a dead socket blocks forever and
+    the awaiting task cannot even be cancelled). Core's default is a generous
+    300s; a benchmark wants to notice a dead server sooner.
     """
-    from falkordb.asyncio import FalkorDB as _FalkorDB
-
     return FalkorDriver(
-        falkor_db=_FalkorDB(
-            host='localhost', port=6379,
-            socket_timeout=float(os.environ.get('FALKOR_SOCKET_TIMEOUT', '120')),
-            socket_connect_timeout=15, socket_keepalive=True, health_check_interval=30,
-        ),
+        host='localhost',
+        port=6379,
         database=database,
+        socket_timeout=float(os.environ.get('FALKOR_SOCKET_TIMEOUT', '120')),
+        socket_connect_timeout=15,
     )
 
 

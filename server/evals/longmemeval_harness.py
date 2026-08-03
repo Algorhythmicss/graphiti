@@ -83,30 +83,21 @@ DB_NAME = os.environ.get('DB_NAME', 'longmemeval5')
 # Must exceed the legitimate worst case -- ~6 min ingest plus a rate-limit
 # backoff of 75s x 12 tries -- so only a true hang trips it.
 QUESTION_TIMEOUT = int(os.environ.get('QUESTION_TIMEOUT', '1500'))
-# ROOT CAUSE of the recurring whole-run freezes: FalkorDriver builds its client
-# as FalkorDB(host, port, ...) with socket_timeout defaulting to None, i.e. a
-# read blocks FOREVER. When a socket dies (Mac sleep, FalkorDB hiccup) the
-# awaiting task can never be cancelled -- asyncio.wait_for issues the cancel and
-# then waits on that same dead socket, so even the per-question timeout hangs.
-# A bounded socket_timeout turns 'hang forever' into a raisable error the retry
-# path can handle. health_check_interval pings idle connections so a stale one
-# is discovered before it is used.
+# Bounded socket, tightened for evals. FalkorDriver now bounds its socket by
+# default (an unbounded one caused this run's recurring whole-run freezes: a dead
+# socket blocks forever and the awaiting task cannot even be cancelled). The
+# core default is a generous 300s; a benchmark wants to notice a dead server much
+# sooner, so override it here.
 FALKOR_SOCKET_TIMEOUT = float(os.environ.get('FALKOR_SOCKET_TIMEOUT', '120'))
 
 
 def falkor_driver(database):
-    """FalkorDriver whose underlying socket cannot block indefinitely."""
-    from falkordb.asyncio import FalkorDB as _FalkorDB
-
     return FalkorDriver(
-        falkor_db=_FalkorDB(
-            host='localhost', port=6379,
-            socket_timeout=FALKOR_SOCKET_TIMEOUT,
-            socket_connect_timeout=15,
-            socket_keepalive=True,
-            health_check_interval=30,
-        ),
+        host='localhost',
+        port=6379,
         database=database,
+        socket_timeout=FALKOR_SOCKET_TIMEOUT,
+        socket_connect_timeout=15,
     )
 
 
