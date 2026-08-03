@@ -2,13 +2,24 @@
 
 Harnesses validating the memory layer. Read `/MEMORY_LAYER.md` first.
 
-## Results so far (2026-07-14)
+## Results (updated 2026-08-03)
 
-- **LongMemEval-oracle n=60 (10/type): 90%** — temporal 100, single-session 100×2, KU 90,
-  pref 90, multi-session 60 (75% non-error). Zep's recipe in this same harness: 58%.
+- **LongMemEval-oracle FULL 500: 89.4% (447/500)** — assistant 96, user 94, pref 93, KU 91,
+  multi-session 88, temporal 83. Pre-registered prediction was 76% (band 70–80), so **+13.4,
+  above the band**: the n=60 tuning generalized. Report + provenance:
+  [`LME500_RESULTS.md`](LME500_RESULTS.md); raw rows in `longmemeval_results.jsonl`.
+- **LongMemEval-oracle n=60 (10/type): 90%** — the full-500 lands within 1 point, so the small
+  sample was not an artifact. Zep's recipe in this same harness: 58%.
 - **LoCoMo n=50 (2 convs, stratified): 78%** — multi-hop 83, temporal 82, single-hop 82,
   adversarial 73, open-domain 60. No per-question tuning.
-- Full-size runs NOT done. Pre-registered predictions: LME-500 ≈76%, LoCoMo-full ≈74%.
+- **LoCoMo-1986 still NOT run.** Prediction ≈74% (69–78). Before starting: prune per-question
+  graphs (see `MEMORY_LAYER.md` §4 — FalkorDB OOM) and keep the machine on AC.
+
+**Reading `*_results.jsonl`:** append-only; authoritative = the **last NON-error row per
+question id**. A naive last-wins read (counting error rows) under-reports — an error must never
+erase a paid answer. Questions answered against an incomplete graph score low and unfairly:
+audit graph completeness before trusting a weak per-type number (temporal went 80→83% purely
+by re-ingesting 13 partial graphs and re-answering).
 
 ## Setup
 
