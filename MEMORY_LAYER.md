@@ -70,11 +70,19 @@ LongMemEval-**S**, not oracle — don't conflate), Mem0 ~66–68% LoCoMo.
    (recommend from stated interests, never abstain) + alignment-style preference judging;
    date-math + latest-supersedes reader rules; FINAL-line parsing.
 
-**Full-size predictions (registered BEFORE running, 2026-07-14):** LME-500 ≈ **76%** (70–80) —
-the full set is 53% temporal+multi-session (our weakest), and the 60 had adaptive tuning.
-LoCoMo-1986 ≈ **74%** (69–78). Costs: LME-500 ~$35–50/~8h; LoCoMo-full ~$60–80/~15–18h
-(30k-TPM gpt-4.1 bound). NOT yet run (credits). If results land ±4 of prediction, the loop
-measured honestly.
+**LME-500 RESULT (2026-08-03): 447/500 = 89.4%** — all 500 answered. Per type: assistant 96,
+user 94, preference 93, knowledge-update 91, multi-session 88, temporal-reasoning 83. Full
+report + provenance: `server/evals/LME500_RESULTS.md`.
+
+Pre-registered 2026-07-14 (BEFORE running): **76%** (70–80), reasoning the full set is 53%
+temporal+multi-session and the 60 had adaptive tuning. **Actual +13.4 above prediction, outside
+the band.** The tuning generalized — the n=60 90% was not a small-sample artifact (full set is
+within 1 point). The prediction's *reasoning* still held qualitatively: temporal (83) and
+multi-session (88) ARE the two weakest types, just far stronger at scale than feared.
+
+**LoCoMo-1986 still pending**, prediction ≈ **74%** (69–78) registered on the same date. Costs:
+~$60–80/~15–18h (30k-TPM gpt-4.1 bound). Harness is ready and now crash/sleep-resilient —
+before starting, PRUNE per-question graphs (see §4 OOM) and keep the machine on AC.
 
 ## 4. Hard-won infra gotchas (will bite you)
 

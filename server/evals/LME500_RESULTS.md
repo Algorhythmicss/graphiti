@@ -1,33 +1,41 @@
-# LongMemEval-500 (oracle) — full-size run
+# LongMemEval-500 (oracle) — full-size run, COMPLETE
 
 Config: `ARM=ours PER_TYPE=200 CHUNK_TURNS=2 CONCURRENCY=2 USE_ONTOLOGY=0 TOP_K=40 READER_MODEL=gpt-4.1`
-Substrate: FalkorDB, one graph per question. Run 2026-07-29 → 2026-08-02.
+Substrate: FalkorDB, one graph per question. Run 2026-07-29 → 2026-08-03.
 
-## Result: **442/499 = 88.6%** (499/500 answered)
+## Result: **447/500 = 89.4%** — all 500 questions answered
 
-| question type | correct | n | acc | of total |
-|---|---|---|---|---|
-| knowledge-update | 71 | 78 | 91% | 78 |
-| multi-session | 117 | 133 | 88% | 133 |
-| single-session-assistant | 54 | 56 | 96% | 56 |
-| single-session-preference | 28 | 30 | 93% | 30 |
-| single-session-user | 66 | 70 | 94% | 70 |
-| temporal-reasoning | 106 | 132 | 80% | 133 |
+| question type | correct | n | acc |
+|---|---|---|---|
+| knowledge-update | 71 | 78 | 91% |
+| multi-session | 117 | 133 | 88% |
+| single-session-assistant | 54 | 56 | 96% |
+| single-session-preference | 28 | 30 | 93% |
+| single-session-user | 66 | 70 | 94% |
+| temporal-reasoning | 111 | 133 | 83% |
 
-**Pre-registered prediction (2026-07-14, before running): 76% (band 70–80).**
-Actual 88.6% — **+12.6 points vs prediction**, above the band.
-The n=60 tuning generalized rather than overfitting.
+## vs the pre-registered prediction
 
-Reference points measured in THIS harness: Zep's own recipe = 58% (n=60).
-Published elsewhere: Zep 71.2% on LongMemEval-**S** (not oracle — do not conflate).
+Registered 2026-07-14, BEFORE running: **76%** (band 70–80), reasoning that the full set is
+53% temporal+multi-session (our weakest types) and that the n=60 had adaptive tuning.
 
-## Caveats
+Actual: **89.4%** — **+13.4 points**, above the band.
 
-- Raw rows live in `longmemeval_results.jsonl` (append-only; the last NON-error row per
-  question_id is authoritative — a later error must never erase a paid answer).
-- Some temporal questions were answered against graphs that ingest left incomplete;
-  a repair pass (top-up ingest + re-answer) supersedes those rows. Scoring a question
-  against partial memory understates it, so the temporal number is a floor until the
-  repair completes.
-- Run was repeatedly interrupted by Mac sleep and by FalkorDB OOM kills; see
-  `MEMORY_LAYER.md` §4. No answer was ever lost — per-answer durability held throughout.
+Read: the fix stack generalized rather than overfitting. The prediction's *reasoning* was
+still sound — temporal-reasoning IS the weakest type (83%) and multi-session second-weakest
+(88%) — but both held far better at scale than feared. The n=60 result (90%) was not a
+small-sample artifact: the full-set number is within 1 point of it.
+
+Reference measured in THIS harness: Zep's own recipe = 58% (n=60).
+Published elsewhere: Zep 71.2% on LongMemEval-**S** (a different, harder split — do not conflate).
+
+## Provenance / how to read the raw data
+
+- `longmemeval_results.jsonl` is append-only. Authoritative read = **last NON-error row per**
+  **`question_id`** (`load_done()` semantics). A later error row must never erase a paid answer;
+  a naive last-wins read under-reports by ~19 questions.
+- Questions whose graphs ingest left incomplete were re-ingested and re-answered in a repair
+  pass; those later rows supersede. Temporal went 80% → 83% once its 13 partial-graph
+  questions were answered against complete memory.
+- The run survived repeated Mac sleeps and two FalkorDB OOM kills. No answer was ever lost —
+  per-answer durability held throughout. Operational post-mortem: `MEMORY_LAYER.md` §4.
