@@ -2,7 +2,7 @@
 
 > **Read this first.** This file lets a fresh contributor (human or model) pick up the entire
 > project in one pass. Companion: `server/evals/README.md` (benchmark runbook).
-> Last updated: 2026-07-14.
+> Last updated: 2026-08-03.
 
 ## 1. Mission
 
