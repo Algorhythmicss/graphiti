@@ -115,11 +115,12 @@ before starting, PRUNE per-question graphs (see §4 OOM) and keep the machine on
   BOTH it and the answer count are frozen. Kill the process GROUP (`set -m` + `kill -- -$pid`) —
   killing the `caffeinate → uv → python` wrapper orphans the real worker, and two harnesses then
   race on the same graphs.
-- **`FalkorDriver` leaves `socket_timeout=None`** → a read blocks FOREVER on a dead socket, and
-  the awaiting task cannot even be cancelled (`asyncio.wait_for` issues the cancel, then waits on
-  that same socket). Build the client explicitly with `socket_timeout`/`socket_connect_timeout`
-  (see `falkor_driver()` in both harnesses). **This affects the production path too**, not just
-  evals — worth fixing in `graphiti_core`.
+- **FIXED in core (74fa00b): `FalkorDriver` used to leave `socket_timeout=None`** → a read blocked
+  FOREVER on a dead socket, and the awaiting task could not even be cancelled (`asyncio.wait_for`
+  issues the cancel, then waits on that same socket). It now defaults to socket_timeout=300s,
+  connect=10s, keepalive, health_check_interval=30 — all constructor args, `socket_timeout=None`
+  restores the old behaviour, and a caller-supplied `falkor_db` instance is left untouched. This
+  was a production-path bug, not just an eval one. If you write another driver, check this.
 - **When a long run freezes, split ingest from QA** (`INGEST_ONLY=1` then `SKIP_INGEST=1`) and run
   ONE question in isolation (`QID_FILTER`) before believing the questions are at fault — the 49
   "stuck" temporal questions each answered correctly in ~2 min once run alone.
