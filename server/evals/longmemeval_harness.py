@@ -6,7 +6,10 @@ temporally (latest-for-updates, count-for-counts) and judge vs gold. v1 undersol
 badly by handing the reader bare undated facts; the graph already carries the
 temporal metadata SOTA needs.
 
-Writes a full report to longmemeval_results.out.
+Writes a full report to longmemeval_results.out, plus longmemeval_results.jsonl
+(one line per question, appended as each completes). Restarting resumes:
+completed non-error results are loaded from the jsonl and skipped; errored
+ones re-run. Delete the jsonl to start a fresh scoring run.
 Usage: PER_TYPE=3 CONCURRENCY=3 TOP_K=25 python longmemeval_harness.py
 """
 
@@ -46,6 +49,7 @@ from graph_service.ontology import KYRA_EDGE_TYPE_MAP, KYRA_EDGE_TYPES, KYRA_ENT
 
 DATA = Path(__file__).parent / 'longmemeval_oracle.json'
 OUT = open(Path(__file__).parent / 'longmemeval_results.out', 'w')
+RESULTS_JSONL = Path(__file__).parent / 'longmemeval_results.jsonl'
 PER_TYPE = int(os.environ.get('PER_TYPE', '4'))
 CONCURRENCY = int(os.environ.get('CONCURRENCY', '1'))
 TOP_K = int(os.environ.get('TOP_K', '30'))
@@ -75,11 +79,75 @@ CHUNK_TURNS = int(os.environ.get('CHUNK_TURNS', '0'))
 QTYPE_FILTER = os.environ.get('QTYPE_FILTER', '')
 QID_FILTER = [q for q in os.environ.get('QID_FILTER', '').split(',') if q]
 DB_NAME = os.environ.get('DB_NAME', 'longmemeval5')
+# Ceiling for one question end-to-end (ingest + retrieve + answer + judge).
+# Must exceed the legitimate worst case -- ~6 min ingest plus a rate-limit
+# backoff of 75s x 12 tries -- so only a true hang trips it.
+QUESTION_TIMEOUT = int(os.environ.get('QUESTION_TIMEOUT', '1500'))
+# Bounded socket, tightened for evals. FalkorDriver now bounds its socket by
+# default (an unbounded one caused this run's recurring whole-run freezes: a dead
+# socket blocks forever and the awaiting task cannot even be cancelled). The
+# core default is a generous 300s; a benchmark wants to notice a dead server much
+# sooner, so override it here.
+FALKOR_SOCKET_TIMEOUT = float(os.environ.get('FALKOR_SOCKET_TIMEOUT', '120'))
+
+
+def falkor_driver(database):
+    return FalkorDriver(
+        host='localhost',
+        port=6379,
+        database=database,
+        socket_timeout=FALKOR_SOCKET_TIMEOUT,
+        socket_connect_timeout=15,
+    )
+
+
 oai = AsyncOpenAI(api_key=os.environ['OPENAI_API_KEY'])
 
 
 def log(*a):
     print(*a, file=OUT, flush=True)
+
+
+def load_done():
+    # Resume map from prior runs: question_id -> result. Errored results are NOT
+    # treated as done (errors score as wrong -- always re-attempt them).
+    done = {}
+    if RESULTS_JSONL.exists():
+        for line in RESULTS_JSONL.open():
+            try:
+                r = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            # Only resume results from the same arm -- mixing ours/zep answers
+            # in one scored run would silently corrupt the comparison.
+            if not r.get('error') and r.get('question_id') and r.get('arm', 'ours') == ARM:
+                done[r['question_id']] = r
+    return done
+
+
+HEARTBEAT = Path(__file__).parent / 'longmemeval_heartbeat'
+
+
+def beat(msg):
+    """Liveness signal for run_supervised.sh.
+
+    Answer count is a BAD stall signal: answers arrive in bursts, and a healthy
+    run can go quiet for 30+ min during ingest or a rate-limit backoff (75s x 12
+    tries). Supervising on answers alone kills healthy runs. This file's mtime
+    advances on every unit of real work, so 'hung' is distinguishable from 'slow'.
+    """
+    try:
+        HEARTBEAT.write_text(f'{datetime.now(timezone.utc):%F %T} {msg}\n')
+    except Exception:
+        pass
+
+
+_JSONL_OUT = RESULTS_JSONL.open('a')
+
+
+def record(result):
+    _JSONL_OUT.write(json.dumps(result, ensure_ascii=False) + '\n')
+    _JSONL_OUT.flush()
 
 
 def parse_date(s):
@@ -105,17 +173,11 @@ def stratified(data, per_type):
     return sample
 
 
-async def ingest(g, inst):
-    gid = inst['question_id']
-    try:
-        if await EntityNode.get_by_group_ids(g.driver, [gid]):
-            return 0  # already ingested -- idempotent resume across runs
-    except Exception:
-        pass
+def episode_units(inst):
+    """The (body, date) episodes this instance should contain -- the ingest plan."""
     dates = inst.get('haystack_dates') or [inst['question_date']] * len(inst['haystack_sessions'])
-    skipped = 0
-    units = []  # (body, date) episodes to ingest
-    for sess, date in zip(inst['haystack_sessions'], dates):
+    units = []
+    for sess, date in zip(inst['haystack_sessions'], dates, strict=False):
         if CHUNK_TURNS > 0:
             step = CHUNK_TURNS * 2  # N user+assistant pairs
             for i in range(0, len(sess), step):
@@ -123,9 +185,27 @@ async def ingest(g, inst):
                 units.append(('\n'.join(f'{t["role"]}: {t["content"]}' for t in chunk), date))
         else:
             units.append(('\n'.join(f'{t["role"]}: {t["content"]}' for t in sess), date))
-    for body, date in units:
-        if not body.strip():
-            continue
+    return [(b, d) for b, d in units if b.strip()]
+
+
+async def ingest(g, inst):
+    gid = inst['question_id']
+    units = episode_units(inst)
+    # Resume at EPISODE granularity, not graph-exists granularity. A run killed
+    # mid-ingest (Mac sleep -> dead sockets) leaves a PARTIAL graph; the old
+    # check ("any EntityNode exists -> skip") accepted those, so QA silently ran
+    # against half a memory and scored low with no error. Compare stored episode
+    # contents against the plan and ingest only what is genuinely missing --
+    # complete graphs still cost zero LLM calls.
+    try:
+        existing = {e.content for e in await EpisodicNode.get_by_group_ids(g.driver, [gid])}
+    except Exception:
+        existing = set()
+    todo = [(b, d) for b, d in units if b not in existing]
+    if not todo:
+        return 0
+    skipped = 0
+    for body, date in todo:
         try:
             # Broad retry: also recover from a transient malformed-extraction-JSON
             # error (graphiti's LLM occasionally returns truncated JSON). Skip the
@@ -140,6 +220,7 @@ async def ingest(g, inst):
                 tries=4, exc=(Exception,))
         except Exception:
             skipped += 1
+        beat(f'ingest {gid}')
     return skipped
 
 
@@ -309,56 +390,98 @@ async def judge(question, gold, pred):
 
 
 async def run_one(g, inst, sem):
-    async with sem:
+    # Hard per-question deadline. Observed in the 500-run: roughly once an hour
+    # BOTH workers freeze permanently (heartbeat and answers stop together) --
+    # a socket that never times out somewhere under the FalkorDB/HTTP clients.
+    # Without this, one stuck question hangs the entire run until the supervisor
+    # kills it, losing every in-flight question with it. A timed-out question is
+    # recorded as an error, so the run continues and resume re-runs it later.
+    # The semaphore is acquired OUT here, not inside the timeout: every question
+    # is scheduled at once and most sit queued for hours, so timing from before
+    # the acquire would fail them all for waiting their turn.
+    try:
+        async with sem:
+            res = await asyncio.wait_for(_run_one_inner(g, inst), timeout=QUESTION_TIMEOUT)
+    except (TimeoutError, asyncio.TimeoutError):
+        res = {'qtype': inst['question_type'], 'correct': False,
+               'error': f'question timeout after {QUESTION_TIMEOUT}s', 'question': inst['question'],
+               # Carry the flag so an INGEST_ONLY pass never writes a result
+               # line. Without it a timed-out ingest appended an 'error' row for
+               # a question that was already answered in an earlier QA run.
+               'ingest_only': INGEST_ONLY}
+    res['question_id'] = inst['question_id']
+    res['arm'] = ARM
+    if not res.get('ingest_only'):
+        record(res)  # durable per-answer write -- a crash never loses paid QA
+    return res
+
+
+async def _run_one_inner(g, inst):
+    try:
+        gid = inst['question_id']
+        # ONE SCOPED CLIENT for BOTH ingest and QA. FalkorDB stores each
+        # group_id as its own graph, and a main-client ingest splits writes
+        # across graphs (episodes vs entities) -- partial graphs, empty
+        # retrieval. Scoping everything to database=gid removes all routing
+        # ambiguity (and matches per-tenant product deployment).
+        gs = Graphiti(graph_driver=falkor_driver(gid))
         try:
-            gid = inst['question_id']
-            # ONE SCOPED CLIENT for BOTH ingest and QA. FalkorDB stores each
-            # group_id as its own graph, and a main-client ingest splits writes
-            # across graphs (episodes vs entities) -- partial graphs, empty
-            # retrieval. Scoping everything to database=gid removes all routing
-            # ambiguity (and matches per-tenant product deployment).
-            gs = Graphiti(graph_driver=FalkorDriver(host='localhost', port=6379, database=gid))
-            try:
-                await gs.build_indices_and_constraints()  # explicit: bg task is too slow for ingest->QA
-                if not SKIP_INGEST:
-                    await ingest(gs, inst)
-                if INGEST_ONLY:
-                    return {'qtype': inst['question_type'], 'ingest_only': True}
-                if ARM == 'zep':
-                    from graphiti_core.search.search_config_recipes import (
-                        COMBINED_HYBRID_SEARCH_CROSS_ENCODER,
-                    )
-                    from graphiti_core.search.search_helpers import (
-                        search_results_to_context_string,
-                    )
-                    cfg = COMBINED_HYBRID_SEARCH_CROSS_ENCODER.model_copy(deep=True)
-                    cfg.limit = TOP_K
-                    sr = await gs.search_(inst['question'], config=cfg, group_ids=[gid])
-                    zep_context = search_results_to_context_string(sr)
-                    pred = await answer_zep(inst['question'], inst.get('question_date', ''), zep_context)
-                    correct = await judge(inst['question'], inst['answer'], pred)
-                    return {'qtype': inst['question_type'], 'correct': correct,
-                            'question': inst['question'], 'gold': inst['answer'], 'pred': pred}
-                facts, evidence, summaries = await retrieve_context(gs, gid, inst['question'])
-            finally:
-                await gs.close()
-            pred = await answer(inst['question'], inst.get('question_date', ''), facts, evidence, summaries)
-            correct = await judge(inst['question'], inst['answer'], pred)
-            return {'qtype': inst['question_type'], 'correct': correct, 'n_facts': len(facts),
-                    'question': inst['question'], 'gold': inst['answer'], 'pred': pred}
-        except Exception as e:
-            return {'qtype': inst['question_type'], 'correct': False, 'error': repr(e)[:200], 'question': inst['question']}
+            await gs.build_indices_and_constraints()  # explicit: bg task is too slow for ingest->QA
+            if not SKIP_INGEST:
+                await ingest(gs, inst)
+            if INGEST_ONLY:
+                return {'qtype': inst['question_type'], 'ingest_only': True}
+            if ARM == 'zep':
+                from graphiti_core.search.search_config_recipes import (
+                    COMBINED_HYBRID_SEARCH_CROSS_ENCODER,
+                )
+                from graphiti_core.search.search_helpers import (
+                    search_results_to_context_string,
+                )
+                cfg = COMBINED_HYBRID_SEARCH_CROSS_ENCODER.model_copy(deep=True)
+                cfg.limit = TOP_K
+                sr = await gs.search_(inst['question'], config=cfg, group_ids=[gid])
+                zep_context = search_results_to_context_string(sr)
+                pred = await answer_zep(inst['question'], inst.get('question_date', ''), zep_context)
+                correct = await judge(inst['question'], inst['answer'], pred)
+                return {'qtype': inst['question_type'], 'correct': correct,
+                        'question': inst['question'], 'gold': inst['answer'], 'pred': pred}
+            facts, evidence, summaries = await retrieve_context(gs, gid, inst['question'])
+            beat(f'retrieved {gid}')
+        finally:
+            await gs.close()
+        pred = await answer(inst['question'], inst.get('question_date', ''), facts, evidence, summaries)
+        beat(f'answered {gid}')
+        correct = await judge(inst['question'], inst['answer'], pred)
+        return {'qtype': inst['question_type'], 'correct': correct, 'n_facts': len(facts),
+                'question': inst['question'], 'gold': inst['answer'], 'pred': pred}
+    except Exception as e:
+        return {'qtype': inst['question_type'], 'correct': False, 'error': repr(e)[:200], 'question': inst['question']}
 
 
 async def main():
     data = json.load(open(DATA))
     sample = stratified(data, PER_TYPE)
-    log(f'sample={len(sample)} ({PER_TYPE}/type) TOP_K={TOP_K} N_EPISODES={N_EPISODES} model={MODEL}\n')
-    g = Graphiti(graph_driver=FalkorDriver(host='localhost', port=6379, database='longmemeval5'))
+    # QID_FILTER is the fix->retest loop: always re-run those qids (the fresh
+    # answer's jsonl line supersedes the old one -- load_done keeps last-wins).
+    done = {} if (INGEST_ONLY or QID_FILTER) else load_done()
+    resumed = [done[x['question_id']] for x in sample if x['question_id'] in done]
+    pending = [x for x in sample if x['question_id'] not in done]
+    log(f'sample={len(sample)} ({PER_TYPE}/type) TOP_K={TOP_K} N_EPISODES={N_EPISODES} model={MODEL}')
+    if resumed:
+        log(f'resumed {len(resumed)} completed answers from {RESULTS_JSONL.name}')
+    log('')
+    g = Graphiti(graph_driver=falkor_driver(DB_NAME))
     await g.build_indices_and_constraints()
     sem = asyncio.Semaphore(CONCURRENCY)
-    results = await asyncio.gather(*[run_one(g, x, sem) for x in sample])
+    results = resumed + list(await asyncio.gather(*[run_one(g, x, sem) for x in pending]))
     await g.close()
+
+    if INGEST_ONLY:
+        # Ingest-only results carry no question/answer -- scoring them crashed
+        # the summary AFTER all the ingest work was already done.
+        log(f'INGEST_ONLY: {len(results)} instances ingested')
+        return
 
     by = defaultdict(lambda: [0, 0])
     errs = 0
@@ -384,3 +507,4 @@ async def main():
 
 asyncio.run(main())
 OUT.close()
+_JSONL_OUT.close()

@@ -416,9 +416,14 @@ class _FakeGraphiti:
     real get_ambient_context handler runs without a graph/OpenAI. ``embedder`` is
     None by default, which exercises the salience path's graceful degradation."""
 
+    class _FakeDriver:
+        async def execute_query(self, *a, **kw):
+            return [], None, None
+
     def __init__(self, edges: list[EntityEdge], embedder=None):
         self._edges = edges
         self.embedder = embedder
+        self.driver = self._FakeDriver()
         self.calls: list[dict] = []
 
     async def search(self, *, group_ids, query, num_results):
@@ -449,7 +454,7 @@ def test_endpoint_empty_window_short_circuits_without_searching():
     resp = client.post('/get-ambient-context', json={'group_id': 'g', 'transcript_window': '   '})
     assert resp.status_code == 200
     body = resp.json()
-    assert body == {'injection_block': '', 'citations': []}
+    assert body == {'trace_uuid': None, 'injection_block': '', 'citations': []}
     assert fake.calls == []  # never hit search
 
 
@@ -504,7 +509,8 @@ def test_endpoint_stays_silent_when_conversation_is_off_topic():
     client, _ = _client(edges, embedder=_FakeEmbedder(vectors))
     resp = client.post('/get-ambient-context', json={'group_id': 'g', 'transcript_window': window})
     assert resp.status_code == 200
-    assert resp.json() == {'injection_block': '', 'citations': []}  # stays silent
+    body = resp.json()
+    assert body['injection_block'] == '' and body['citations'] == []  # stays silent
 
 
 def test_endpoint_injects_and_scores_relevant_facts():
@@ -535,4 +541,5 @@ def test_endpoint_stays_silent_when_nothing_clears_block_floor():
     client, _ = _client(edges, embedder=_FakeEmbedder(vectors))
     resp = client.post('/get-ambient-context', json={'group_id': 'g', 'transcript_window': window})
     assert resp.status_code == 200
-    assert resp.json() == {'injection_block': '', 'citations': []}  # block floor not cleared
+    body = resp.json()
+    assert body['injection_block'] == '' and body['citations'] == []  # block floor not cleared

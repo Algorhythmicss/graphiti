@@ -24,7 +24,13 @@ import pytest
 from graphiti_core.driver.driver import GraphProvider
 
 try:
-    from graphiti_core.driver.falkordb_driver import FalkorDriver, FalkorDriverSession
+    from graphiti_core.driver.falkordb_driver import (
+        DEFAULT_HEALTH_CHECK_INTERVAL,
+        DEFAULT_SOCKET_CONNECT_TIMEOUT,
+        DEFAULT_SOCKET_TIMEOUT,
+        FalkorDriver,
+        FalkorDriverSession,
+    )
 
     HAS_FALKORDB = True
 except ImportError:
@@ -52,8 +58,41 @@ class TestFalkorDriver:
             )
             assert driver.provider == GraphProvider.FALKORDB
             mock_falkor_db.assert_called_once_with(
-                host='test-host', port='1234', username='test-user', password='test-pass'
+                host='test-host',
+                port='1234',
+                username='test-user',
+                password='test-pass',
+                socket_timeout=DEFAULT_SOCKET_TIMEOUT,
+                socket_connect_timeout=DEFAULT_SOCKET_CONNECT_TIMEOUT,
+                socket_keepalive=True,
+                health_check_interval=DEFAULT_HEALTH_CHECK_INTERVAL,
             )
+
+    @unittest.skipIf(not HAS_FALKORDB, 'FalkorDB is not installed')
+    def test_init_bounds_socket_by_default(self):
+        """Socket reads must be bounded: an unset socket_timeout blocks forever on a
+        half-open connection, and the awaiting task then cannot even be cancelled."""
+        with patch('graphiti_core.driver.falkordb_driver.FalkorDB') as mock_falkor_db:
+            FalkorDriver()
+            kwargs = mock_falkor_db.call_args.kwargs
+            assert kwargs['socket_timeout'] is not None
+            assert kwargs['socket_connect_timeout'] is not None
+            assert kwargs['socket_keepalive'] is True
+            assert kwargs['health_check_interval'] > 0
+
+    @unittest.skipIf(not HAS_FALKORDB, 'FalkorDB is not installed')
+    def test_init_socket_timeouts_are_overridable(self):
+        """Callers can tune the bounds, including opting back into unbounded blocking."""
+        with patch('graphiti_core.driver.falkordb_driver.FalkorDB') as mock_falkor_db:
+            FalkorDriver(socket_timeout=12.5, socket_connect_timeout=3, health_check_interval=7)
+            kwargs = mock_falkor_db.call_args.kwargs
+            assert kwargs['socket_timeout'] == 12.5
+            assert kwargs['socket_connect_timeout'] == 3
+            assert kwargs['health_check_interval'] == 7
+
+        with patch('graphiti_core.driver.falkordb_driver.FalkorDB') as mock_falkor_db:
+            FalkorDriver(socket_timeout=None)
+            assert mock_falkor_db.call_args.kwargs['socket_timeout'] is None
 
     @unittest.skipIf(not HAS_FALKORDB, 'FalkorDB is not installed')
     def test_init_with_falkor_db_instance(self):

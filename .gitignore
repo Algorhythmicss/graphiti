@@ -166,3 +166,11 @@ cache.db*
 
 # All DS_Store files
 .DS_Store
+# Benchmark datasets (fetch per server/evals/README.md — 15M+, not source)
+server/evals/longmemeval_oracle.json
+server/evals/locomo/
+# Eval run artifacts (results.jsonl IS committed as the record; these are scratch)
+server/evals/*.log
+server/evals/*_heartbeat
+server/evals/*.out
+server/evals/*.jsonl.bak

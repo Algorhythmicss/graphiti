@@ -72,6 +72,15 @@ from graphiti_core.utils.datetime_utils import convert_datetimes_to_strings
 
 logger = logging.getLogger(__name__)
 
+# Generous enough that no healthy query trips it, but bounded: without a socket
+# timeout the redis client blocks forever on a half-open connection (a laptop
+# sleeping, the server being OOM-killed), and the awaiting task cannot even be
+# cancelled -- asyncio.wait_for issues the cancel and then waits on that same
+# dead socket. Bounded means a hang surfaces as a raisable, retryable error.
+DEFAULT_SOCKET_TIMEOUT: float = 300.0
+DEFAULT_SOCKET_CONNECT_TIMEOUT: float = 10.0
+DEFAULT_HEALTH_CHECK_INTERVAL: int = 30
+
 
 def _strip_nul_bytes(value: Any) -> Any:
     if isinstance(value, str):
@@ -136,6 +145,9 @@ class FalkorDriver(GraphDriver):
         password: str | None = None,
         falkor_db: FalkorDB | None = None,
         database: str = 'default_db',
+        socket_timeout: float | None = DEFAULT_SOCKET_TIMEOUT,
+        socket_connect_timeout: float | None = DEFAULT_SOCKET_CONNECT_TIMEOUT,
+        health_check_interval: int = DEFAULT_HEALTH_CHECK_INTERVAL,
     ):
         """
         Initialize the FalkorDB driver.
@@ -150,7 +162,16 @@ class FalkorDriver(GraphDriver):
         username (str | None): The username for authentication (if required).
         password (str | None): The password for authentication (if required).
         falkor_db (FalkorDB | None): An existing FalkorDB instance to use instead of creating a new one.
+            When supplied, the timeout arguments below are NOT applied -- configure them on that
+            instance yourself.
         database (str): The name of the database to connect to. Defaults to 'default_db'.
+        socket_timeout (float | None): Seconds to wait on a socket read before raising. The
+            underlying redis client defaults this to None, meaning a read blocks FOREVER on a
+            half-open connection -- and an awaiting task cannot even be cancelled, because
+            cancellation waits on that same socket. Pass None to restore that unbounded behaviour.
+        socket_connect_timeout (float | None): Seconds to wait when establishing a connection.
+        health_check_interval (int): Seconds between health checks on idle pooled connections, so
+            a connection broken while idle is detected before a query is issued on it.
         """
         super().__init__()
         self._database = database
@@ -158,7 +179,16 @@ class FalkorDriver(GraphDriver):
             # If a FalkorDB instance is provided, use it directly
             self.client = falkor_db
         else:
-            self.client = FalkorDB(host=host, port=port, username=username, password=password)
+            self.client = FalkorDB(
+                host=host,
+                port=port,
+                username=username,
+                password=password,
+                socket_timeout=socket_timeout,
+                socket_connect_timeout=socket_connect_timeout,
+                socket_keepalive=True,
+                health_check_interval=health_check_interval,
+            )
 
         # Instantiate FalkorDB operations
         self._entity_node_ops = FalkorEntityNodeOperations()

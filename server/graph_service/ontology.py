@@ -115,6 +115,16 @@ class Meeting(BaseModel):
     topic: str | None = Field(default=None, description='What the meeting is about')
 
 
+class Preference(BaseModel):
+    """A stated or implied preference, taste, or working style of a person -- e.g.
+    "prefers async standups", "always books window seats", "prefers Slack over email".
+    Source is who holds it, target is what it concerns."""
+
+    strength: str | None = Field(
+        default=None, description="One of 'stated' (explicit) or 'implied' (behavioral)"
+    )
+
+
 class WorksAt(BaseModel):
     """Employment or membership of a person in an organization."""
 
@@ -135,6 +145,7 @@ KYRA_EDGE_TYPES: dict[str, type[BaseModel]] = {
     'TASK': Task,
     'MEETING': Meeting,
     'WORKS_AT': WorksAt,
+    'PREFERENCE': Preference,
 }
 
 # Passed as edge_type_map=. Maps (source_type, target_type) -> allowed edge types
@@ -146,9 +157,9 @@ KYRA_EDGE_TYPE_MAP: dict[tuple[str, str], list[str]] = {
     ('Person', 'Person'): ['COMMITMENT', 'MEETING'],
     ('Person', 'Organization'): ['WORKS_AT', 'COMMITMENT'],
     ('Person', 'Project'): ['TASK', 'COMMITMENT', 'MEETING'],
-    ('Person', 'Entity'): ['COMMITMENT', 'TASK'],
+    ('Person', 'Entity'): ['COMMITMENT', 'TASK', 'PREFERENCE'],
     ('Entity', 'Person'): ['COMMITMENT', 'MEETING'],
     ('Entity', 'Organization'): ['WORKS_AT', 'COMMITMENT'],
     ('Entity', 'Project'): ['TASK', 'COMMITMENT', 'MEETING'],
-    ('Entity', 'Entity'): ['COMMITMENT', 'TASK'],
+    ('Entity', 'Entity'): ['COMMITMENT', 'TASK', 'PREFERENCE'],
 }

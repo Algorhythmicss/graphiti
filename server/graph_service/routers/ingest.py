@@ -91,6 +91,18 @@ async def add_messages(
     return Result(message='Messages added to processing queue', success=True)
 
 
+@router.post('/consolidate/{group_id}', status_code=status.HTTP_200_OK)
+async def consolidate(group_id: str, graphiti: ZepGraphitiDep):
+    """Phase-5 sleep-time consolidation pass: TTL-expire facts past their
+    validity horizon and regenerate summaries of entities whose facts were
+    superseded (from open facts only). Run off the hot path (cron/worker)."""
+    from datetime import datetime, timezone
+
+    from graph_service.consolidation import consolidate_group
+
+    return await consolidate_group(graphiti, group_id, datetime.now(timezone.utc))
+
+
 @router.post('/entity-node', status_code=status.HTTP_201_CREATED)
 async def add_entity_node(
     request: AddEntityNodeRequest,
